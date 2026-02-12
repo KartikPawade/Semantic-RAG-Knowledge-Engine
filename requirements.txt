@@ -1,0 +1,29 @@
+# Enterprise Knowledge Engine - Production RAG System
+# Core
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.6
+httpx>=0.26.0
+
+# LangChain & LCEL
+langchain>=0.1.0
+langchain-ollama>=0.2.0
+langchain-community>=0.0.20
+langchain-chroma>=0.1.0
+langchain-text-splitters>=0.2.0
+
+# Vector DB
+chromadb>=0.4.22
+
+# Document Loaders
+pypdf>=4.0.0
+
+# Local LLM & embeddings via Ollama (langchain-ollama talks to Ollama server)
+
+# Utilities
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
+
+# Optional: Sample PDF generation
+fpdf2>=2.7.0
