@@ -24,8 +24,10 @@ class Settings(BaseSettings):
     upload_dir: Path = Path("./uploads")
     data_dir: Path = Path("./data")
 
-    # Collection management: separate "HR Data" from "Engineering Data", etc.
+    # Collection management: default for search/ask when no collection specified
     default_collection: str = "hr_manual"
+    # Fallback collection for autonomous ingestion when document cannot be classified
+    default_fallback_collection: str = "unclassified_knowledge"
 
     # Chunking: Recursive Character with overlap so edge facts aren't lost
     chunk_size: int = 1000

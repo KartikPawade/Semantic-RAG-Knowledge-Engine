@@ -16,6 +16,16 @@ from langchain_core.vectorstores import VectorStore
 from app.embeddings import get_embedding_model
 
 
+def list_collection_names(persist_directory: str | Path) -> list[str]:
+    """List all existing collection names in ChromaDB (for classification routing)."""
+    path = Path(persist_directory)
+    if not path.exists():
+        return []
+    client = chromadb.PersistentClient(path=str(path))
+    collections = client.list_collections()
+    return [c.name for c in collections]
+
+
 def clear_collection(persist_directory: str | Path, collection_name: str) -> None:
     """Wipe the named collection from ChromaDB (for testing/reset)."""
     path = Path(persist_directory)

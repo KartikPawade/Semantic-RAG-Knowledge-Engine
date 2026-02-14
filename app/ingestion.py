@@ -1,16 +1,23 @@
 """
-Ingestion: Load documents and chunk them for the Vector DB.
+Ingestion: Autonomous flow — classify then chunk and embed.
 
-- PyPDFLoader for PDFs; can be extended for plain text.
-- Recursive character chunking with configurable size/overlap.
+Flow:
+1. Read & sample: first 1,000 words of each document.
+2. Classify: LLM compares content to known collections (or suggests new name).
+3. Route: ingest into matching collection; create collection on-the-fly if new;
+   fallback to default (unclassified_knowledge) if UNCLASSIFIED.
 """
 from pathlib import Path
+import re
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_core.documents import Document
+from langchain_core.language_models import BaseChatModel
+from langchain_core.output_parsers import StrOutputParser
 
 from app.chunking import get_text_splitter
-from app.vector_store import get_vector_store
+from app.vector_store import get_vector_store, list_collection_names
+from app.prompts import CLASSIFY_COLLECTION_PROMPT
 
 
 def load_document(file_path: str | Path) -> list[Document]:
@@ -28,32 +35,97 @@ def load_document(file_path: str | Path) -> list[Document]:
     return loader.load()
 
 
+def get_first_n_words(documents: list[Document], n: int = 1000) -> str:
+    """Concatenate document texts and return the first n words (for classification)."""
+    full_text = "\n".join(doc.page_content or "" for doc in documents)
+    words = full_text.split()
+    return " ".join(words[:n]) if words else ""
+
+
+def classify_document_to_collection(
+    sample_text: str,
+    existing_collections: list[str],
+    fallback_collection: str,
+    llm: BaseChatModel,
+) -> str:
+    """
+    Classify document excerpt into an existing collection, a new collection name, or fallback.
+    Returns the collection name to use (existing or new); creates collection later on add.
+    """
+    existing_str = ", ".join(existing_collections) if existing_collections else "(none)"
+    chain = CLASSIFY_COLLECTION_PROMPT | llm | StrOutputParser()
+    raw = chain.invoke({
+        "existing_collections": existing_str,
+        "document_excerpt": (sample_text or "")[:8000],  # cap token usage
+    })
+    name = (raw or "").strip()
+    if not name or name.upper() == "UNCLASSIFIED":
+        return fallback_collection
+    # Normalize: allow only word chars and underscores
+    name = re.sub(r"[^\w_]", " ", name).strip().replace(" ", "_").strip("_")
+    if not name or name.upper() == "UNCLASSIFIED":
+        return fallback_collection
+    name = name.lower()
+    if "_collection" not in name:
+        name = name + "_collection"
+    return name
+
+
 def ingest_files(
     file_paths: list[str | Path],
     persist_directory: str | Path,
-    collection_name: str,
+    fallback_collection: str,
+    llm: BaseChatModel,
     chunk_size: int = 1000,
     chunk_overlap: int = 200,
+    sample_words: int = 1000,
     *,
     ollama_base_url: str = "http://localhost:11434",
     ollama_embedding_model: str = "nomic-embed-text",
-) -> int:
+) -> dict:
     """
-    Load files, split into chunks, embed with Ollama, and store in ChromaDB.
-    Returns the number of chunks added.
+    Autonomous ingestion: for each file, sample first N words, classify to a collection,
+    then chunk and embed into that collection (creating it if needed). Unknown docs
+    go to fallback_collection.
+
+    Returns dict with: chunks_added (total), files_processed, and routing (list of
+    {file, collection, chunks}).
     """
+    existing = list_collection_names(persist_directory)
     splitter = get_text_splitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-    all_docs: list[Document] = []
+    total_chunks = 0
+    routing: list[dict] = []
+
     for fp in file_paths:
-        all_docs.extend(load_document(fp))
-    if not all_docs:
-        return 0
-    chunks = splitter.split_documents(all_docs)
-    vector_store = get_vector_store(
-        persist_directory=persist_directory,
-        collection_name=collection_name,
-        ollama_base_url=ollama_base_url,
-        ollama_embedding_model=ollama_embedding_model,
-    )
-    vector_store.add_documents(chunks)
-    return len(chunks)
+        path = Path(fp)
+        docs = load_document(path)
+        if not docs:
+            continue
+        sample = get_first_n_words(docs, n=sample_words)
+        collection_name = classify_document_to_collection(
+            sample, existing, fallback_collection, llm
+        )
+        # Dynamic creation: collection is created on first add_documents
+        if collection_name not in existing:
+            existing.append(collection_name)
+        vs = get_vector_store(
+            persist_directory=persist_directory,
+            collection_name=collection_name,
+            ollama_base_url=ollama_base_url,
+            ollama_embedding_model=ollama_embedding_model,
+        )
+        chunks = splitter.split_documents(docs)
+        vs.add_documents(chunks)
+        n = len(chunks)
+        total_chunks += n
+        routing.append({
+            "file": path.name,
+            "collection": collection_name,
+            "chunks": n,
+        })
+
+    return {
+        "chunks_added": total_chunks,
+        "files_processed": len(routing),
+        "routing": routing,
+    }

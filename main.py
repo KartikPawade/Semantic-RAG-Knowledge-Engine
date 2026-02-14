@@ -96,54 +96,54 @@ async def status():
     }
 
 
-# This is a FastAPI POST endpoint for uploading and ingesting files (PDF or text).
-# Its purpose is to allow users to upload one or more PDF or plain text files,
-# which are then processed and converted into searchable vector embeddings
-# (for use in retrieval-augmented generation and semantic search).
+# Autonomous ingestion: no collection parameter. Each file is classified (first 1000 words)
+# into an existing or new collection, or routed to the default fallback collection.
 
 @app.post("/ingest")
-async def ingest(
-    files: list[UploadFile] = File(...),
-    collection: str | None = Query(None, description="Collection name (default from config)"),
-):
+async def ingest(files: list[UploadFile] = File(...)):
     """
-    Upload and process files (PDFs/Text). Converts raw files into searchable vectors.
+    Upload and process files (PDFs/Text). Autonomous flow: for each file, the system
+    reads the first 1,000 words, classifies it against known collections (or suggests
+    a new one), then chunks and embeds into that collection. Unclassifiable docs
+    go to the default fallback collection (unclassified_knowledge).
     """
-    # 1. Check if at least one file was uploaded
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
-    # 2. Make sure the upload directory exists
     _ensure_upload_dir()
     saved: list[Path] = []
     try:
-        # 3. For each uploaded file:
         for u in files:
             suffix = Path(u.filename or "").suffix.lower()
-            #    - Only allow .pdf, .txt, or .text extensions
             if suffix not in (".pdf", ".txt", ".text"):
                 raise HTTPException(
                     status_code=400,
                     detail=f"Unsupported file type: {u.filename}. Use .pdf or .txt",
                 )
-            #    - Save the file to disk in the upload dir
             path = settings.upload_dir / (u.filename or "upload")
             path.write_bytes(await u.read())
             saved.append(path)
-        # 4. Ingest these files into the vector store by splitting and embedding them,
-        #    so their contents become searchable as chunks
-        count = ingest_files(
+        llm = get_chat_model(
+            base_url=settings.ollama_base_url,
+            model=settings.ollama_llm_model,
+        )
+        result = ingest_files(
             file_paths=saved,
             persist_directory=settings.chroma_persist_dir,
-            collection_name=_collection(collection),
+            fallback_collection=settings.default_fallback_collection,
+            llm=llm,
             chunk_size=settings.chunk_size,
             chunk_overlap=settings.chunk_overlap,
+            sample_words=1000,
             ollama_base_url=settings.ollama_base_url,
             ollama_embedding_model=settings.ollama_embedding_model,
         )
-        # 5. Return a simple summary with ingest status, number of chunks, and files processed
-        return {"status": "ok", "chunks_added": count, "files_processed": len(saved)}
+        return {
+            "status": "ok",
+            "chunks_added": result["chunks_added"],
+            "files_processed": result["files_processed"],
+            "routing": result["routing"],
+        }
     finally:
-        # 6. Remove uploaded files to avoid accumulating data on disk, regardless of errors
         for p in saved:
             try:
                 p.unlink()

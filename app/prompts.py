@@ -16,3 +16,25 @@ RAG_PROMPT_SIMPLE = ChatPromptTemplate.from_messages(
         ("human", "{question}"),
     ]
 )
+
+# ----- Autonomous ingestion: document classification -----
+
+CLASSIFY_COLLECTION_SYSTEM = """You are a document classifier. Your job is to decide which knowledge collection a document belongs to.
+
+Given:
+1) A short excerpt from a document (first ~1000 words).
+2) A list of existing collection names (if any).
+
+You must reply with EXACTLY one of:
+- One of the existing collection names exactly as written (if the document clearly fits that collection), OR
+- A new collection name in snake_case ending with _collection (e.g. company_policy_collection, invoice_collection, product_details_collection) if the document fits a new category, OR
+- The word UNCLASSIFIED if the document does not clearly fit any category and you cannot suggest a meaningful new one.
+
+Reply with ONLY the collection name or UNCLASSIFIED. No explanation, no quotes, no punctuation after the name."""
+
+CLASSIFY_COLLECTION_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", CLASSIFY_COLLECTION_SYSTEM),
+        ("human", "Existing collections: {existing_collections}\n\nDocument excerpt:\n{document_excerpt}"),
+    ]
+)
