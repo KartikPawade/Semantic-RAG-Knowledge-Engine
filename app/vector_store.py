@@ -66,7 +66,7 @@ def get_vector_store(
 def get_retriever(
     vector_store: VectorStore,
     k: int = 4,
-    score_threshold: float | None = None,
+    score_threshold: float = 0.35,
 ):
     """
     Retriever with optional similarity score threshold (filtering).
@@ -75,9 +75,8 @@ def get_retriever(
     when no relevant context is found.
     """
     search_kwargs: dict = {"k": k}
-    if score_threshold is not None:
-        search_kwargs["score_threshold"] = score_threshold
-    search_type = "similarity_score_threshold" if score_threshold is not None else "similarity"
+    search_kwargs["score_threshold"] = score_threshold
+    search_type = "similarity_score_threshold"
     return vector_store.as_retriever(
         search_type=search_type,
         search_kwargs=search_kwargs,

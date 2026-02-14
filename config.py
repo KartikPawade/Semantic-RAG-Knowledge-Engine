@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     chunk_overlap: int = 200
 
     # Similarity threshold: if top result < this, say "I don't know"
-    similarity_threshold: float = 0.2
+    similarity_threshold: float = 0.35
 
     # Query Expansion (Advanced RAG): max alternative queries to generate
     query_expansion_max_queries: int = 3
