@@ -10,9 +10,10 @@ SYSTEM_INSTRUCTION = """You are an HR Assistant. Use ONLY the provided context t
 If the answer is not in the context, say: "I cannot find that in the manual."
 Do not use outside knowledge. Do not make up policy details."""
 
+# schema_hint: cheat sheet of collections and their filters (injected when collection is known; can be empty)
 RAG_PROMPT_SIMPLE = ChatPromptTemplate.from_messages(
     [
-        ("system", SYSTEM_INSTRUCTION + "\n\nContext:\n{context}"),
+        ("system", SYSTEM_INSTRUCTION + "\n\n{schema_hint}\n\nContext:\n{context}"),
         ("human", "{question}"),
     ]
 )
@@ -53,5 +54,27 @@ CLASSIFY_QUERY_COLLECTION_PROMPT = ChatPromptTemplate.from_messages(
     [
         ("system", CLASSIFY_QUERY_COLLECTION_SYSTEM),
         ("human", "Existing collections: {existing_collections}\n\nUser query: {user_query}"),
+    ]
+)
+
+# ----- Schema-driven: metadata extraction (ingestion) -----
+
+METADATA_EXTRACT_SYSTEM = """You are a metadata extractor. Given a document excerpt and a list of metadata field names, extract values for those fields from the document. Use short, normalized values (e.g. city code 'NY' not 'New York', department name like 'HR' or 'Engineering'). If a value cannot be determined, omit the key or use null. Reply with ONLY a valid JSON object, no other text. Example: {"city": "NY", "department": "HR"}"""
+
+METADATA_EXTRACT_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", METADATA_EXTRACT_SYSTEM),
+        ("human", "Metadata fields to extract: {field_names}\n\nDocument excerpt:\n{excerpt}"),
+    ]
+)
+
+# ----- Schema-driven: filter extraction from user query (search/ask) -----
+
+EXTRACT_FILTER_SYSTEM = """You extract filter values from a user query for a document search. You are given the allowed filter field names for the current collection and a hint on when to use them. Output ONLY a JSON object with those field names as keys and extracted values (or null if not mentioned). Use short, normalized values. If the user does not mention a filter, do not include it or set it to null. Reply with ONLY valid JSON, no explanation."""
+
+EXTRACT_FILTER_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", EXTRACT_FILTER_SYSTEM),
+        ("human", "Allowed filters: {field_names}\nHint: {schema_hint}\n\nUser query: {user_query}"),
     ]
 )

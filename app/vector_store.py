@@ -67,15 +67,18 @@ def get_retriever(
     vector_store: VectorStore,
     k: int = 4,
     score_threshold: float = 0.35,
+    filter: dict | None = None,
 ):
     """
-    Retriever with optional similarity score threshold (filtering).
+    Retriever with optional similarity score threshold and metadata filter.
     Chroma uses distance (lower = more similar). With score_threshold we only
-    return documents with distance <= threshold, so we can say "I don't know"
-    when no relevant context is found.
+    return documents with distance <= threshold. filter is a Chroma where clause
+    (schema-driven) to restrict by metadata.
     """
     search_kwargs: dict = {"k": k}
     search_kwargs["score_threshold"] = score_threshold
+    if filter:
+        search_kwargs["filter"] = filter
     search_type = "similarity_score_threshold"
     return vector_store.as_retriever(
         search_type=search_type,

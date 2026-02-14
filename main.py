@@ -16,8 +16,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from config import get_settings
+from app.filter_extraction import extract_filters_from_query
 from app.ingestion import ingest_files, classify_query_to_collection
 from app.rag import build_rag_chain, build_rag_chain_with_query_expansion, ask_rag
+from app.schema_registry import get_schema_hint_for_rag
 from app.vector_store import get_vector_store, get_retriever, list_collection_names, clear_collection
 from app.llm import get_chat_model
 
@@ -166,17 +168,21 @@ async def ingest(files: list[UploadFile] = File(...)):
 @app.post("/search")
 async def search(body: SearchRequest):
     """
-    Semantic search. Collection is resolved dynamically: the user query is
-    classified via LLM against existing collections; search runs on that
-    single collection (or unclassified_knowledge if none match).
+    Semantic search with schema-driven filters. Step 1: route query to a
+    collection. Step 2: extract metadata filters from the query using that
+    collection's schema; search runs on that collection with filter (or none).
     """
     llm = get_chat_model(
         base_url=settings.ollama_base_url,
         model=settings.ollama_llm_model,
     )
     collection = _resolve_collection_for_query(body.query, llm)
+    chroma_filter = extract_filters_from_query(body.query, collection, llm)
     vs = _get_vector_store(collection)
-    results = vs.similarity_search_with_score(body.query, k=body.k)
+    search_kwargs: dict = {"k": body.k}
+    if chroma_filter:
+        search_kwargs["filter"] = chroma_filter
+    results = vs.similarity_search_with_score(body.query, **search_kwargs)
     snippets = [
         {
             "content": doc.page_content,
@@ -191,28 +197,31 @@ async def search(body: SearchRequest):
 @app.post("/ask")
 async def ask(body: AskRequest):
     """
-    Full RAG: search + Ollama answer. Collection is resolved dynamically: the
-    user question is classified via LLM against existing collections; RAG runs
-    on that single collection (or unclassified_knowledge if none match).
+    Full RAG with schema-driven filters. Step 1: route question to a collection.
+    Step 2: extract metadata filters from the question; retrieval uses that
+    collection and filter. Schema hints are injected into the system prompt.
     """
     llm = get_chat_model(
         base_url=settings.ollama_base_url,
         model=settings.ollama_llm_model,
     )
     collection = _resolve_collection_for_query(body.question, llm)
+    chroma_filter = extract_filters_from_query(body.question, collection, llm)
     vs = _get_vector_store(collection)
     retriever = get_retriever(
         vs,
         k=4,
         score_threshold=settings.similarity_threshold,
+        filter=chroma_filter,
     )
+    schema_hint = get_schema_hint_for_rag([collection])
     if body.use_query_expansion:
         chain = build_rag_chain_with_query_expansion(
             retriever, llm, max_expanded_queries=settings.query_expansion_max_queries
         )
     else:
         chain = build_rag_chain(retriever, llm)
-    answer = ask_rag(chain, body.question)
+    answer = ask_rag(chain, body.question, schema_hint=schema_hint)
     return {"question": body.question, "collection": collection, "answer": answer}
 
 

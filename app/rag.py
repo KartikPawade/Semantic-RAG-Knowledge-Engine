@@ -85,6 +85,7 @@ def build_rag_chain_with_query_expansion(
 def ask_rag(
     chain,
     question: str,
+    schema_hint: str = "",
 ) -> str:
-    """Run the RAG chain for one question."""
-    return chain.invoke({"question": question})
+    """Run the RAG chain for one question. schema_hint is injected for schema-driven collections."""
+    return chain.invoke({"question": question, "schema_hint": schema_hint or ""})

@@ -1,13 +1,16 @@
 """
-Ingestion: Autonomous flow — classify then chunk and embed.
+Ingestion: Autonomous flow — classify then chunk, enrich metadata, embed.
 
 Flow:
 1. Read & sample: first 1,000 words of each document.
 2. Classify: LLM compares content to known collections (or suggests new name).
-3. Route: ingest into matching collection; create collection on-the-fly if new;
+3. Metadata extraction: Schema-aware LLM extracts fields (city, department, etc.)
+   from the document and attaches to every chunk (automatic metadata enrichment).
+4. Route: ingest into matching collection; create collection on-the-fly if new;
    fallback to default (unclassified_knowledge) if UNCLASSIFIED.
 """
 from pathlib import Path
+import json
 import re
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
@@ -16,8 +19,13 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import StrOutputParser
 
 from app.chunking import get_text_splitter
+from app.schema_registry import get_collection_schema
 from app.vector_store import get_vector_store, list_collection_names
-from app.prompts import CLASSIFY_COLLECTION_PROMPT, CLASSIFY_QUERY_COLLECTION_PROMPT
+from app.prompts import (
+    CLASSIFY_COLLECTION_PROMPT,
+    CLASSIFY_QUERY_COLLECTION_PROMPT,
+    METADATA_EXTRACT_PROMPT,
+)
 
 
 def load_document(file_path: str | Path) -> list[Document]:
@@ -105,6 +113,41 @@ def classify_query_to_collection(
     return fallback_collection
 
 
+def extract_metadata_for_document(
+    document_excerpt: str,
+    collection_name: str,
+    llm: BaseChatModel,
+) -> dict:
+    """
+    Schema-aware metadata extraction during ingestion. Uses the collection's
+    schema from the registry and a small LLM call to fill in fields (city,
+    department, product_id, region, etc.) from the document text.
+    Returns a dict suitable for chunk.metadata; empty if no schema or parse failure.
+    """
+    schema = get_collection_schema(collection_name)
+    if not schema.fields:
+        return {}
+    field_names = ", ".join(schema.fields.keys())
+    chain = METADATA_EXTRACT_PROMPT | llm | StrOutputParser()
+    raw = (chain.invoke({
+        "field_names": field_names,
+        "excerpt": (document_excerpt or "")[:6000],
+    }) or "").strip()
+    # Strip markdown code block if present
+    if raw.startswith("```"):
+        raw = re.sub(r"^```\w*\n?", "", raw).strip()
+    if raw.endswith("```"):
+        raw = raw.rsplit("```", 1)[0].strip()
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return {}
+        # Only keep keys that are in the schema
+        return {k: v for k, v in data.items() if k in schema.fields and v is not None and v != ""}
+    except json.JSONDecodeError:
+        return {}
+
+
 def ingest_files(
     file_paths: list[str | Path],
     persist_directory: str | Path,
@@ -149,6 +192,11 @@ def ingest_files(
             ollama_embedding_model=ollama_embedding_model,
         )
         chunks = splitter.split_documents(docs)
+        # Schema-driven: enrich chunks with extracted metadata from registry
+        extracted = extract_metadata_for_document(sample, collection_name, llm)
+        if extracted:
+            for c in chunks:
+                c.metadata = {**(c.metadata or {}), **extracted}
         vs.add_documents(chunks)
         n = len(chunks)
         total_chunks += n
