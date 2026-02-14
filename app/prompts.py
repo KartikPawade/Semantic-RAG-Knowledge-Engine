@@ -38,3 +38,20 @@ CLASSIFY_COLLECTION_PROMPT = ChatPromptTemplate.from_messages(
         ("human", "Existing collections: {existing_collections}\n\nDocument excerpt:\n{document_excerpt}"),
     ]
 )
+
+# ----- Search/Ask: query-to-collection routing -----
+
+CLASSIFY_QUERY_COLLECTION_SYSTEM = """You are a query router. Given a user search query or question and a list of existing knowledge collections, decide which single collection is most likely to contain the answer.
+
+Rules:
+- Reply with EXACTLY one existing collection name as written in the list (if the query clearly relates to that collection), OR
+- Reply with the word UNCLASSIFIED if the query does not clearly relate to any of the listed collections.
+
+Do NOT suggest new collection names. Do NOT explain. Reply with ONLY the collection name or UNCLASSIFIED."""
+
+CLASSIFY_QUERY_COLLECTION_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", CLASSIFY_QUERY_COLLECTION_SYSTEM),
+        ("human", "Existing collections: {existing_collections}\n\nUser query: {user_query}"),
+    ]
+)

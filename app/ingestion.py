@@ -17,7 +17,7 @@ from langchain_core.output_parsers import StrOutputParser
 
 from app.chunking import get_text_splitter
 from app.vector_store import get_vector_store, list_collection_names
-from app.prompts import CLASSIFY_COLLECTION_PROMPT
+from app.prompts import CLASSIFY_COLLECTION_PROMPT, CLASSIFY_QUERY_COLLECTION_PROMPT
 
 
 def load_document(file_path: str | Path) -> list[Document]:
@@ -69,6 +69,40 @@ def classify_document_to_collection(
     if "_collection" not in name:
         name = name + "_collection"
     return name
+
+
+def classify_query_to_collection(
+    user_query: str,
+    existing_collections: list[str],
+    fallback_collection: str,
+    llm: BaseChatModel,
+) -> str:
+    """
+    Classify user query (search or question) into one existing collection or fallback.
+    Uses LLM with list of collections; if the answer is not in any, returns
+    fallback_collection (e.g. unclassified_knowledge). Does not create new collections.
+    """
+    if not existing_collections:
+        return fallback_collection
+    existing_str = ", ".join(existing_collections)
+    chain = CLASSIFY_QUERY_COLLECTION_PROMPT | llm | StrOutputParser()
+    raw = (chain.invoke({
+        "existing_collections": existing_str,
+        "user_query": (user_query or "").strip()[:2000],
+    }) or "").strip()
+    if not raw or raw.upper() == "UNCLASSIFIED":
+        return fallback_collection
+    # Normalize: strip, lowercase for comparison
+    raw_lower = re.sub(r"[^\w_]", "", raw).strip().lower()
+    if not raw_lower or raw_lower == "unclassified":
+        return fallback_collection
+    # Match against existing collections (exact match after normalizing)
+    for col in existing_collections:
+        col_norm = re.sub(r"[^\w_]", "", col).strip().lower()
+        if col_norm and raw_lower == col_norm:
+            return col
+    # LLM returned something not in list; use fallback
+    return fallback_collection
 
 
 def ingest_files(

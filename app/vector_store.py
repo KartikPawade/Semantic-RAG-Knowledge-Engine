@@ -63,7 +63,7 @@ def get_vector_store(
     )
 
 
-def get_retriever( 
+def get_retriever(
     vector_store: VectorStore,
     k: int = 4,
     score_threshold: float | None = None,

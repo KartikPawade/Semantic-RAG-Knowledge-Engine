@@ -16,9 +16,9 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from config import get_settings
-from app.ingestion import ingest_files
+from app.ingestion import ingest_files, classify_query_to_collection
 from app.rag import build_rag_chain, build_rag_chain_with_query_expansion, ask_rag
-from app.vector_store import get_vector_store, get_retriever, clear_collection
+from app.vector_store import get_vector_store, get_retriever, list_collection_names, clear_collection
 from app.llm import get_chat_model
 
 app = FastAPI(
@@ -35,13 +35,11 @@ settings = get_settings()
 
 class SearchRequest(BaseModel):
     query: str = Field(..., description="Search query")
-    collection: str | None = Field(None, description="Collection name (default from config)")
     k: int = Field(5, ge=1, le=20, description="Number of snippets to return")
 
 
 class AskRequest(BaseModel):
     question: str = Field(..., description="Question for the RAG assistant")
-    collection: str | None = Field(None, description="Collection name (default from config)")
     use_query_expansion: bool = Field(
         False,
         description="Use Query Expansion: generate alternative phrasings and retrieve for each (better recall)",
@@ -59,12 +57,26 @@ def _ensure_upload_dir():
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
 
 
-def _get_vector_store(collection: str | None = None):
+def _get_vector_store(collection: str):
     return get_vector_store(
         persist_directory=settings.chroma_persist_dir,
-        collection_name=_collection(collection),
+        collection_name=collection,
         ollama_base_url=settings.ollama_base_url,
         ollama_embedding_model=settings.ollama_embedding_model,
+    )
+
+
+def _resolve_collection_for_query(user_query: str, llm) -> str:
+    """
+    Route user query to a single collection via LLM (like document classification).
+    Returns existing collection name or default_fallback_collection if none match.
+    """
+    existing = list_collection_names(settings.chroma_persist_dir)
+    return classify_query_to_collection(
+        user_query=user_query,
+        existing_collections=existing,
+        fallback_collection=settings.default_fallback_collection,
+        llm=llm,
     )
 
 
@@ -154,39 +166,45 @@ async def ingest(files: list[UploadFile] = File(...)):
 @app.post("/search")
 async def search(body: SearchRequest):
     """
-    Semantic search: returns relevant text snippets from the vector DB.
-    Use this to verify the "search" part of RAG.
+    Semantic search. Collection is resolved dynamically: the user query is
+    classified via LLM against existing collections; search runs on that
+    single collection (or unclassified_knowledge if none match).
     """
-    vs = _get_vector_store(body.collection)
-    # similarity_search_with_score returns (doc, distance); lower distance = more similar
+    llm = get_chat_model(
+        base_url=settings.ollama_base_url,
+        model=settings.ollama_llm_model,
+    )
+    collection = _resolve_collection_for_query(body.query, llm)
+    vs = _get_vector_store(collection)
     results = vs.similarity_search_with_score(body.query, k=body.k)
     snippets = [
         {
             "content": doc.page_content,
-            "score": float(score),  # distance: lower is better
-            "metadata": doc.metadata,
+            "score": float(score),
+            "metadata": {**doc.metadata, "collection": collection},
         }
         for doc, score in results
     ]
-    return {"query": body.query, "snippets": snippets}
+    return {"query": body.query, "collection": collection, "snippets": snippets}
 
 
 @app.post("/ask")
 async def ask(body: AskRequest):
     """
-    Full RAG: search + Ollama (llama3) answer. Uses only provided context; says
-    "I cannot find that in the manual" when the answer is not in the docs.
-    Set use_query_expansion=true for Advanced RAG (Query Expansion) to improve recall.
+    Full RAG: search + Ollama answer. Collection is resolved dynamically: the
+    user question is classified via LLM against existing collections; RAG runs
+    on that single collection (or unclassified_knowledge if none match).
     """
-    vs = _get_vector_store(body.collection)
+    llm = get_chat_model(
+        base_url=settings.ollama_base_url,
+        model=settings.ollama_llm_model,
+    )
+    collection = _resolve_collection_for_query(body.question, llm)
+    vs = _get_vector_store(collection)
     retriever = get_retriever(
         vs,
         k=4,
         score_threshold=settings.similarity_threshold,
-    )
-    llm = get_chat_model(
-        base_url=settings.ollama_base_url,
-        model=settings.ollama_llm_model,
     )
     if body.use_query_expansion:
         chain = build_rag_chain_with_query_expansion(
@@ -195,7 +213,7 @@ async def ask(body: AskRequest):
     else:
         chain = build_rag_chain(retriever, llm)
     answer = ask_rag(chain, body.question)
-    return {"question": body.question, "answer": answer}
+    return {"question": body.question, "collection": collection, "answer": answer}
 
 
 @app.delete("/clear")
