@@ -1,4 +1,4 @@
-# Semantic-RAG-Knowledge-Engine
+# 🚀Semantic-RAG-Knowledge-Engine
 
 A production-ready **Advanced RAG** API with **metadata filtering**, **schema-driven routing**, and **dynamic Pydantic validation**. Ingest PDFs and text via **autonomous ingestion**, run **semantic search** with **collection routing** and **metadata filters**, and get answers grounded only in your documents. Built with **embeddings**, **ChromaDB**, **Ollama** (llama3 + nomic-embed-text), **LCEL**, and a **Schema Registry** for multi-collection **metadata filtering**.
 
@@ -20,7 +20,7 @@ A production-ready **Advanced RAG** API with **metadata filtering**, **schema-dr
 
 ---
 
-## Concepts Used in This Project
+## 🏗️Concepts Used in This Project
 
 ### 1. Advanced RAG (Retrieval-Augmented Generation)
 
@@ -83,7 +83,7 @@ A production-ready **Advanced RAG** API with **metadata filtering**, **schema-dr
 
 ---
 
-## APIs and Their Flow
+## 🔗APIs and Their Flow
 
 ### Overview
 
@@ -175,7 +175,7 @@ A production-ready **Advanced RAG** API with **metadata filtering**, **schema-dr
 
 ---
 
-## Schema Registry (multi-collection metadata)
+## 📋Schema Registry (multi-collection metadata)
 
 The **Schema Registry** (`app/schema_registry.py`) is the "system map" for **metadata filtering** and **schema-driven routing**.
 
@@ -191,7 +191,7 @@ The **Schema Registry** (`app/schema_registry.py`) is the "system map" for **met
 
 ---
 
-## Setup Guide
+## ⚙️Setup Guide
 
 ### Prerequisites
 
@@ -313,7 +313,7 @@ Leave it running. It consumes from the `ingestion_tasks` queue, hashes files for
 
 ---
 
-## Project Layout
+## 📂Project Layout
 
 ```
 Semantic-RAG-Knowledge-Engine/
@@ -345,7 +345,7 @@ Runtime-created (in `.gitignore`): `uploads/`, `chroma_db/`, `data/processed_has
 
 ---
 
-## Configuration
+## 🛠️Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -365,7 +365,7 @@ Runtime-created (in `.gitignore`): `uploads/`, `chroma_db/`, `data/processed_has
 
 ---
 
-## Collections & Schema-Driven Routing
+## 📂Collections & Schema-Driven Routing
 
 - **Ingestion:** No collection in the request. **Autonomous ingestion** classifies each file to an existing or new collection (or **unclassified_knowledge**). **Metadata extraction** enriches chunks using the **Schema Registry**.
 - **Search / Ask:** No collection in the request. **Collection routing** (LLM) and **schema-aware filter extraction** (LLM + **dynamic Pydantic validation**) determine the collection and **metadata filters**; retrieval uses Chroma **where** clauses when filters are present.
