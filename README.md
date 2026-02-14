@@ -1,65 +1,75 @@
 # Semantic-RAG-Knowledge-Engine
 
-A production-ready **Retrieval-Augmented Generation (RAG)** API: ingest PDFs and text, run **semantic search**, and get answers grounded only in your documents. Built with **embeddings**, **ChromaDB**, **Ollama** (llama3 + nomic-embed-text), and **LCEL**.
+A production-ready **Advanced RAG** API with **metadata filtering**, **schema-driven routing**, and **dynamic Pydantic validation**. Ingest PDFs and text via **autonomous ingestion**, run **semantic search** with **collection routing** and **metadata filters**, and get answers grounded only in your documents. Built with **embeddings**, **ChromaDB**, **Ollama** (llama3 + nomic-embed-text), **LCEL**, and a **Schema Registry** for multi-collection **metadata filtering**.
+
+**Keywords:** Advanced RAG · Metadata filtering · Dynamic Pydantic validation · Query expansion · Schema-driven routing · Autonomous ingestion · Collection routing · Schema Registry · ChromaDB · Ollama · LCEL · Retrieval-Augmented Generation · Semantic search · Multi-collection · Metadata extraction · Filter extraction · Grounded Q&A
 
 ---
 
 ## Use Cases
 
-| Use case | How it’s supported |
+| Use case | How it's supported |
 |----------|---------------------|
-| **Document ingestion** | Upload PDFs or text → chunk (recursive character) → embed (Ollama) → store in ChromaDB. Separate collections (e.g. `hr_manual`, `engineering_docs`) for different domains. |
-| **Semantic search** | `POST /search`: embed the query, run similarity search over stored chunks, return snippets + scores (no LLM). Good for testing retrieval. |
-| **Grounded Q&A (RAG)** | `POST /ask`: retrieve relevant chunks → augment prompt with context → LLM answers only from context; says “I cannot find that in the manual” when not in docs. |
-| **Advanced RAG – Query Expansion** | `POST /ask` with `use_query_expansion: true`: expand the question into 2–3 alternative phrasings → retrieve for each → merge/dedupe docs → same RAG answer. Improves recall when user wording differs from the document. |
-| **Collection management** | Ingest/search/ask target a collection (default or per request). `DELETE /clear` wipes one collection for testing. |
+| **Autonomous document ingestion** | Upload files → **classify** (LLM, first 1,000 words) → **metadata extraction** (schema-aware LLM) → chunk → embed → store in ChromaDB. **Dynamic collection creation**; fallback to **unclassified_knowledge**. No collection parameter required. |
+| **Semantic search with metadata filtering** | `POST /search`: **collection routing** (LLM) → **schema-aware filter extraction** (LLM + **dynamic Pydantic validation**) → **metadata filtering** in ChromaDB → return snippets + scores. |
+| **Advanced RAG with Query Expansion** | `POST /ask` with `use_query_expansion: true`: **query expansion** (2–3 alternative phrasings) → retrieve for each → merge/dedupe → RAG answer. Improves recall. |
+| **Advanced RAG with metadata filtering** | `POST /ask`: **collection routing** → **filter extraction** (Schema Registry + **dynamic Pydantic validation**) → retrieval with **metadata filters** → **schema hints** in system prompt → grounded answer. |
+| **Schema Registry (multi-collection metadata)** | **Schema-driven routing**: each collection has defined metadata fields (e.g. `city`, `department`, `product_id`, `region`), **schema hints** for the AI, and **value normalizers** to avoid zero-result errors. |
 | **Health / ops** | `GET /status`: check Ollama and ChromaDB availability. |
+| **Collection clear** | `DELETE /clear`: wipe a collection (optional query param). |
 
 ---
 
 ## Concepts Used in This Project
 
-### 1. Embeddings (the “language of numbers”)
+### 1. Advanced RAG (Retrieval-Augmented Generation)
 
-- Text is converted into **vectors** (lists of numbers) so we can compare meaning, not just keywords.
-- **Normalization** keeps vector length consistent so distances (e.g. between “Paternity Leave” and “Childcare”) are comparable across chunks of different length.
-- This project uses **Ollama** with the **nomic-embed-text** model for local embeddings.
+- **RAG** = retrieve relevant chunks → augment prompt with context → LLM answers only from context.
+- **Advanced RAG** in this app: **Query Expansion** (multiple phrasings → merge/dedupe), **metadata filtering** (schema-driven filters), **collection routing** (LLM picks collection), and **schema hints** in the system prompt for grounded, filter-aware answers.
 
-### 2. Vector database (ChromaDB)
+### 2. Metadata filtering & Schema-driven routing
 
-- Vectors are stored in **ChromaDB**, which acts as a semantic search index.
-- **Persistence:** Data is saved to disk (`./chroma_db`) so you don’t re-ingest PDFs after a server restart.
-- **Collections:** Data is grouped into named collections (e.g. `hr_manual`, `engineering_docs`) so you can separate HR content from other domains and search per collection.
+- **Metadata filtering**: Search and RAG restrict results by metadata (e.g. `city=NY`, `department=HR`, `product_id=A99`) so users see only relevant docs (e.g. policy for their office, product for their region).
+- **Schema Registry**: A code-level map of each collection to its **allowed metadata fields**, **schema hints** for the AI, and **filter strategy**. Decouples metadata schema from LLM logic.
+- **Two-step extraction**: (1) **Collection routing** — LLM chooses which collection fits the query. (2) **Schema-aware filter extraction** — LLM extracts only that collection’s fields from the user query; **dynamic Pydantic validation** and **value normalizers** (e.g. "New York" → "NY") avoid zero-result errors.
 
-### 3. RAG (Retrieval-Augmented Generation)
+### 3. Dynamic Pydantic validation
 
-- The model does **not** answer from its own training; it answers using **retrieved chunks** from your documents.
-- Flow: user question → **retrieve** relevant chunks from the vector DB → **augment** the prompt with that context → **generate** an answer from the LLM. That’s RAG.
+- **Dynamic Pydantic models**: The app builds a temporary Pydantic model per collection from the **Schema Registry** (e.g. `city: Optional[str]`, `department: Optional[str]`). The LLM’s filter JSON is validated and normalized with this model before building the Chroma **where** clause.
+- Ensures only **allowed fields** and valid types are used for **metadata filtering**; invalid or unknown values are dropped (None fallback).
 
-### 4. Recursive character chunking
+### 4. Query Expansion (Advanced RAG)
 
-- A full PDF is too large to send as one “thought”; it’s split into **chunks** (default 1,000 characters).
-- **Chunk overlap** (default 200 characters): the last 200 characters of one chunk are repeated at the start of the next so information at chunk boundaries (e.g. a key date) isn’t lost.
-- Implemented with **RecursiveCharacterTextSplitter** (LangChain).
+- **Problem:** User phrasing may differ from document wording; single-query retrieval can miss relevant chunks.
+- **Query Expansion:** LLM generates 2–3 alternative phrasings (rephrasing, synonyms, sub-questions). We **retrieve for each** query, **merge and deduplicate** chunks, then run the same RAG prompt. Improves **recall**.
+- **Usage:** Set `use_query_expansion: true` in `POST /ask`. Config: `QUERY_EXPANSION_MAX_QUERIES` (default 3).
 
-### 5. Similarity score and thresholding
+### 5. Autonomous ingestion flow
 
-- Vector search returns a **score** (distance: lower = more similar).
-- **Filtering:** If the best match is below a configured **similarity threshold**, we treat it as “no relevant context” and the system is instructed to say it cannot find the answer in the manual instead of guessing.
+- **Read & sample:** First 1,000 words of each document.
+- **Classify:** LLM compares content to **existing collections** (from ChromaDB); returns an existing collection name, a **new** collection name (snake_case, `_collection` suffix), or **UNCLASSIFIED**.
+- **Metadata extraction (Schema Registry):** If the collection has a schema (e.g. `policy_collection` → `city`, `department`), a small LLM call extracts those fields from the document and attaches them to **every chunk** (automatic metadata enrichment).
+- **Route:** Ingest into the chosen collection; **dynamic collection creation** if the name is new; **fallback** to **unclassified_knowledge** if UNCLASSIFIED.
 
-### 6. System instructions (grounding)
+### 6. Embeddings & vector database (ChromaDB)
 
-- A **system prompt** constrains the LLM: answer **only** from the provided context; if the answer isn’t there, say “I cannot find that in the manual.” This keeps answers grounded and avoids hallucination.
+- Text → **vectors** via **Ollama** (**nomic-embed-text**). **ChromaDB** stores vectors with **persistence** (`./chroma_db`). **Collections** separate domains (policies, products, unclassified). **Metadata** on chunks enables **metadata filtering**.
 
-### 7. LCEL (LangChain Expression Language)
+### 7. Recursive character chunking
 
-- The RAG pipeline is built as a **chain** using LCEL: retriever → format docs → prompt → LLM → output. Composable and easy to extend.
+- **Chunk size** 1,000 characters, **overlap** 200 so boundary information isn’t lost. **RecursiveCharacterTextSplitter** (LangChain).
 
-### 8. Query Expansion (Advanced RAG)
+### 8. Similarity score & thresholding
 
-- **Problem:** A user might ask “How much paternity leave do I get?” while the document says “Fathers are entitled to 2 weeks paid leave.” Single-query retrieval can miss the chunk if phrasing differs.
-- **Query Expansion:** The LLM generates 2–3 alternative phrasings (rephrasing, synonyms, or sub-questions) from the user question. We run **retrieval for each** expanded query, **merge and deduplicate** the documents, then pass the combined context to the same RAG prompt and LLM. This improves **recall** without changing how the answer is grounded.
-- **Usage:** Set `use_query_expansion: true` in the `POST /ask` request body. Config: `QUERY_EXPANSION_MAX_QUERIES` (default 3).
+- Chroma returns **distance** (lower = more similar). **Score threshold** filters out weak matches; RAG says "I cannot find that in the manual" when no chunk passes.
+
+### 9. System instructions & schema hints
+
+- **Grounding:** System prompt instructs the LLM to use **only** the provided context. **Schema hints** (from the Schema Registry) are injected for the chosen collection so the AI knows which **metadata filters** apply (e.g. "Use city and department when the user mentions location or team").
+
+### 10. LCEL (LangChain Expression Language)
+
+- RAG and query-expansion chains are built with **LCEL**: retriever → format docs → prompt → LLM → output. Composable and easy to extend.
 
 ---
 
@@ -69,75 +79,71 @@ A production-ready **Retrieval-Augmented Generation (RAG)** API: ingest PDFs and
 
 | # | Endpoint   | Method | Purpose |
 |---|------------|--------|---------|
-| 1 | `/ingest`  | POST   | Upload files → chunk, embed, store in ChromaDB. |
-| 2 | `/search`  | POST   | Semantic search over stored chunks (snippets + scores). |
-| 3 | `/ask`     | POST   | Full RAG: search + LLM answer (grounded in your docs). |
-| 4 | `/clear`   | DELETE | Wipe a collection (reset for testing). |
-| 5 | `/status`  | GET    | Health check: Ollama and ChromaDB. |
+| 1 | `/ingest`  | POST   | **Autonomous ingestion**: classify → metadata extraction → chunk → embed → store. No collection in request. |
+| 2 | `/search`  | POST   | **Semantic search** with **collection routing** + **metadata filtering** (schema-aware filter extraction). |
+| 3 | `/ask`     | POST   | **Advanced RAG**: collection routing, **metadata filtering**, optional **Query Expansion**, **schema hints**. |
+| 4 | `/clear`   | DELETE | Wipe a collection (optional `?collection=...`). |
+| 5 | `/status`  | GET    | Health: Ollama and ChromaDB. |
 
 ---
 
-### 1. `POST /ingest`
+### 1. `POST /ingest` (Autonomous ingestion)
 
-**Purpose:** Turn PDFs or text files into searchable vectors.
+**Purpose:** Turn PDFs or text files into searchable vectors with **autonomous collection routing** and **schema-aware metadata extraction**.
 
 **Flow:**
 
-1. Accept one or more files (multipart form: `files`; optional query param: `collection`).
-2. Save files temporarily, load with **PyPDFLoader** (PDF) or **TextLoader** (.txt).
-3. Split into chunks with **RecursiveCharacterTextSplitter** (chunk_size=1000, overlap=200).
-4. Embed chunks with **Ollama** (nomic-embed-text) and add to **ChromaDB** in the given (or default) collection.
-5. Return `chunks_added` and `files_processed`; temp files are deleted.
+1. Accept one or more files (multipart form: `files`). **No collection parameter** — routing is automatic.
+2. For each file: load (PyPDFLoader / TextLoader), take **first 1,000 words**, **classify** via LLM (existing collection, new name, or UNCLASSIFIED).
+3. **Metadata extraction:** If the chosen collection has a schema in the **Schema Registry**, run a small LLM call to extract fields (e.g. `city`, `department`) from the document and attach to all chunks.
+4. Chunk with **RecursiveCharacterTextSplitter**, embed with **Ollama**, add to **ChromaDB** in the chosen collection (creating it if new). **Fallback:** `unclassified_knowledge` if UNCLASSIFIED.
+5. Return `chunks_added`, `files_processed`, and **routing** (file → collection → chunks).
 
-**Request:** Multipart form with `files`; optional `?collection=hr_manual`.
+**Request:** Multipart form with `files` only.
 
-**Response:** `{ "status": "ok", "chunks_added": 12, "files_processed": 1 }`
+**Response:** `{ "status": "ok", "chunks_added": 12, "files_processed": 1, "routing": [ { "file": "policy.pdf", "collection": "policy_collection", "chunks": 12 } ] }`
 
 ---
 
-### 2. `POST /search`
+### 2. `POST /search` (Semantic search + metadata filtering)
 
-**Purpose:** Test semantic search: get relevant text snippets (no LLM).
+**Purpose:** **Semantic search** with **collection routing** and **schema-aware metadata filtering**. Two-step extraction: route to collection, then extract filters from the query.
 
 **Flow:**
 
-1. Accept JSON body: `query`, optional `collection`, optional `k` (number of results, 1–20).
-2. Embed the query with the same Ollama embedding model.
-3. Run **similarity search** in ChromaDB (default collection if not specified).
-4. Return matching chunks with **content**, **score** (distance; lower = more similar), and **metadata**.
+1. **Collection routing:** LLM selects one collection from ChromaDB’s list (or **unclassified_knowledge**).
+2. **Filter extraction:** LLM extracts filter values from the query using that collection’s **Schema Registry** schema; **dynamic Pydantic validation** and **value normalizers**; build Chroma **where** clause (or none to avoid zero-result).
+3. **Similarity search** in that collection with optional **metadata filter**; return snippets with **content**, **score**, **metadata** (including `collection`).
 
-**Request body:** `{ "query": "paternity leave", "collection": null, "k": 5 }`
+**Request body:** `{ "query": "HR policy in New York", "k": 5 }`
 
-**Response:** `{ "query": "paternity leave", "snippets": [ { "content": "...", "score": 0.32, "metadata": {} } ] }`
+**Response:** `{ "query": "...", "collection": "policy_collection", "snippets": [ { "content": "...", "score": 0.32, "metadata": { "collection": "policy_collection", "city": "NY", "department": "HR" } } ] }`
 
 ---
 
-### 3. `POST /ask`
+### 3. `POST /ask` (Advanced RAG + Query Expansion + metadata filtering)
 
-**Purpose:** Full RAG: answer a question using only your ingested documents. Optional **Query Expansion** for better recall.
+**Purpose:** Full **Advanced RAG**: **collection routing**, **metadata filtering**, **schema hints** in the system prompt. Optional **Query Expansion** for better recall.
 
 **Flow:**
 
-1. Accept JSON body: `question`, optional `collection`, optional `use_query_expansion` (default `false`).
-2. If `use_query_expansion` is `true`: **expand** the question into 2–3 alternative queries (LLM), **retrieve** for each query, **merge and dedupe** chunks.
-3. Otherwise: **Retrieve** top-k chunks above the similarity threshold (retriever with score_threshold).
-4. **Format** chunks into a single context string.
-5. **Prompt** the LLM (Ollama llama3) with system instructions: “Use only the provided context; if not found, say I cannot find that in the manual.”
-6. **Generate** and return the answer.
+1. **Collection routing** and **schema-aware filter extraction** (same as search).
+2. **Retriever** with **metadata filter** and similarity threshold.
+3. If `use_query_expansion: true`: **Query Expansion** — 2–3 alternative queries → retrieve for each → **merge and dedupe** chunks.
+4. **Schema hints** for the chosen collection are injected into the system prompt.
+5. **RAG chain:** format context → prompt (grounding + schema hints) → LLM → answer.
 
-**Request body (basic):** `{ "question": "How much paternity leave do I get?", "collection": null }`
+**Request body (basic):** `{ "question": "What is the paternity leave policy in NY?" }`
 
-**Request body (with Query Expansion):** `{ "question": "How much paternity leave do I get?", "collection": null, "use_query_expansion": true }`
+**Request body (with Query Expansion):** `{ "question": "What is the paternity leave policy in NY?", "use_query_expansion": true }`
 
-**Response:** `{ "question": "...", "answer": "Paternity Leave is 2 weeks paid leave..." }`
+**Response:** `{ "question": "...", "collection": "policy_collection", "answer": "..." }`
 
 ---
 
 ### 4. `DELETE /clear`
 
-**Purpose:** Wipe a collection (e.g. for testing).
-
-**Flow:** Delete the named (or default) collection from ChromaDB. No request body; optional query param: `?collection=hr_manual`.
+**Purpose:** Wipe a collection. Optional query param: `?collection=hr_manual`.
 
 **Response:** `{ "status": "ok", "message": "Collection 'hr_manual' cleared." }`
 
@@ -145,11 +151,25 @@ A production-ready **Retrieval-Augmented Generation (RAG)** API: ingest PDFs and
 
 ### 5. `GET /status`
 
-**Purpose:** Check if Ollama and ChromaDB are reachable.
-
-**Flow:** Call Ollama API (e.g. `/api/tags`) and ChromaDB heartbeat.
+**Purpose:** Check Ollama and ChromaDB availability.
 
 **Response:** `{ "ollama": "online" | "offline", "chromadb": "online" | "offline" }`
+
+---
+
+## Schema Registry (multi-collection metadata)
+
+The **Schema Registry** (`app/schema_registry.py`) is the "system map" for **metadata filtering** and **schema-driven routing**.
+
+| Collection                    | Metadata fields     | Schema hint (for AI) |
+|------------------------------|---------------------|-----------------------|
+| **policy_collection**        | `city`, `department`| Use city and department when the user mentions location or team. |
+| **product_catalog_collection**| `product_id`, `region` | If a product code is mentioned (e.g. A99), extract into product_id; filter by region if user specifies location. |
+| **unclassified_knowledge**    | (none)              | No specific filters; semantic search only. |
+
+- **Dynamic Pydantic validation:** `build_filter_model(collection_name)` creates an optional-field Pydantic model from the registry for **filter extraction** validation.
+- **Value normalizers:** e.g. `"New York"` → `"NY"` to match stored metadata and avoid zero-result errors (configurable in `VALUE_NORMALIZERS`).
+- **Schema hints** are passed into the RAG system prompt so the model is aware of which **metadata filters** apply.
 
 ---
 
@@ -158,24 +178,34 @@ A production-ready **Retrieval-Augmented Generation (RAG)** API: ingest PDFs and
 ### Prerequisites
 
 - **Python 3.10+**
-- **Ollama** installed and running (for llama3 and nomic-embed-text)
+- **Ollama** installed and running (for **llama3** and **nomic-embed-text**)
 
-### 1. Clone and go to the project
+### 1. Clone and enter the project
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/Semantic-RAG-Knowledge-Engine.git
 cd Semantic-RAG-Knowledge-Engine
 ```
 
-(Or use your actual repo URL and folder name.)
+### 2. Virtual environment
 
-### 2. Create and activate a virtual environment
+**Windows (PowerShell)** — if scripts are disabled, run once in that session:
 
-**Windows (PowerShell):**
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
+```
+
+Then:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+.venv\Scripts\activate
+```
+
+**Or run without activating:**
+
+```powershell
+.venv\Scripts\python.exe main.py
 ```
 
 **Windows (Cmd):**
@@ -185,14 +215,12 @@ python -m venv .venv
 .venv\Scripts\activate.bat
 ```
 
-**WSL / Linux / macOS:**
+**Linux / macOS:**
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 ```
-
-You should see `(.venv)` in your prompt.
 
 ### 3. Install dependencies
 
@@ -203,38 +231,33 @@ pip install -r requirements.txt
 
 ### 4. Ollama: run server and pull models
 
-Ensure Ollama is running (e.g. `ollama serve` or the Ollama app), then pull both models:
-
 ```bash
 ollama pull llama3
 ollama pull nomic-embed-text
+ollama list
 ```
 
-Verify with: `ollama list`
-
-### 5. Environment file
+### 5. Environment
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` if needed. Defaults (Ollama on localhost) are usually fine:
+Edit `.env` if needed. Defaults: `OLLAMA_BASE_URL`, `OLLAMA_LLM_MODEL`, `OLLAMA_EMBEDDING_MODEL`, `DEFAULT_FALLBACK_COLLECTION=unclassified_knowledge`, etc.
 
-- `OLLAMA_BASE_URL=http://localhost:11434`
-- `OLLAMA_LLM_MODEL=llama3`
-- `OLLAMA_EMBEDDING_MODEL=nomic-embed-text`
-
-If the app runs on **Windows** and Ollama is in **WSL**, and `localhost` doesn’t work, set `OLLAMA_BASE_URL` to your WSL IP (e.g. `http://172.x.x.x:11434`).
-
-### 6. (Optional) Generate a sample HR PDF
+### 6. (Optional) Sample HR PDF
 
 ```bash
 python scripts/generate_sample_hr_pdf.py
 ```
 
-This creates `data/hr_manual_sample.pdf` for testing ingest and `/ask`.
-
 ### 7. Run the API
+
+```bash
+python main.py
+```
+
+Or:
 
 ```bash
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
@@ -245,9 +268,10 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 ### 8. Quick test
 
-1. **GET** http://localhost:8000/status → expect `"ollama": "online"` and `"chromadb": "online"`.
-2. **POST /ingest** → upload `data/hr_manual_sample.pdf` (or any PDF).
-3. **POST /ask** → body: `{"question": "How much paternity leave do I get?"}`.
+1. **GET** http://localhost:8000/status → expect `ollama` and `chromadb` online.
+2. **POST /ingest** → upload a PDF (no collection param; **autonomous ingestion**).
+3. **POST /search** → `{ "query": "paternity leave", "k": 5 }` (collection and **metadata filtering** resolved automatically).
+4. **POST /ask** → `{ "question": "How much paternity leave do I get?" }` or with `"use_query_expansion": true` for **Query Expansion**.
 
 ---
 
@@ -255,26 +279,28 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 ```
 Semantic-RAG-Knowledge-Engine/
-├── main.py              # FastAPI app and 5 endpoints
-├── config.py            # Settings (Ollama, chunk size, threshold, paths)
+├── main.py                 # FastAPI app: ingest, search, ask, clear, status
+├── config.py               # Settings (Ollama, chunks, similarity threshold, fallback collection)
 ├── app/
-│   ├── embeddings.py       # Ollama embeddings (nomic-embed-text)
-│   ├── vector_store.py     # ChromaDB: persistence, collections, retriever
-│   ├── chunking.py         # RecursiveCharacterTextSplitter (1000 / 200)
-│   ├── ingestion.py        # PyPDFLoader + chunk + store
-│   ├── prompts.py          # System instructions (grounding)
-│   ├── query_expansion.py  # Advanced RAG: expand question into multiple queries
-│   ├── rag.py              # LCEL RAG chain (+ query expansion chain)
-│   └── llm.py              # Chat model (Ollama llama3)
+│   ├── embeddings.py      # Ollama embeddings (nomic-embed-text)
+│   ├── vector_store.py    # ChromaDB: list collections, retriever with metadata filter
+│   ├── chunking.py        # RecursiveCharacterTextSplitter (1000 / 200)
+│   ├── ingestion.py       # Autonomous ingestion: classify, metadata extraction, chunk, store
+│   ├── schema_registry.py # Schema Registry: collection schemas, dynamic Pydantic, normalizers
+│   ├── filter_extraction.py # Schema-aware filter extraction from user query (dynamic Pydantic validation)
+│   ├── prompts.py        # RAG, classification, metadata extraction, filter extraction, schema hints
+│   ├── query_expansion.py # Advanced RAG: expand question into multiple queries
+│   ├── rag.py             # LCEL RAG chain (+ query expansion), ask_rag with schema_hint
+│   └── llm.py             # Chat model (Ollama llama3)
 ├── scripts/
 │   └── generate_sample_hr_pdf.py
-├── data/                # Optional sample PDFs
+├── data/
 ├── requirements.txt
 ├── .env.example
 └── README.md
 ```
 
-Runtime-created (and in `.gitignore`): `uploads/`, `chroma_db/`, `.venv/`, `.env`.
+Runtime-created (in `.gitignore`): `uploads/`, `chroma_db/`, `.venv/`, `.env`.
 
 ---
 
@@ -283,19 +309,20 @@ Runtime-created (and in `.gitignore`): `uploads/`, `chroma_db/`, `.venv/`, `.env
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL. |
-| `OLLAMA_LLM_MODEL` | `llama3` | Model for `/ask` (RAG answers). |
-| `OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text` | Model for embeddings (ingest + search). |
-| `CHROMA_PERSIST_DIR` | `./chroma_db` | ChromaDB data directory. |
-| `DEFAULT_COLLECTION` | `hr_manual` | Default collection name. |
+| `OLLAMA_LLM_MODEL` | `llama3` | Model for RAG, classification, metadata/filter extraction. |
+| `OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text` | Embeddings (ingest + search). |
+| `CHROMA_PERSIST_DIR` | `./chroma_db` | ChromaDB persistence directory. |
+| `DEFAULT_COLLECTION` | `hr_manual` | Default collection when none specified for clear. |
+| `DEFAULT_FALLBACK_COLLECTION` | `unclassified_knowledge` | Fallback collection for autonomous ingestion and query routing when UNCLASSIFIED. |
 | `CHUNK_SIZE` | `1000` | Characters per chunk. |
 | `CHUNK_OVERLAP` | `200` | Overlap between chunks. |
-| `SIMILARITY_THRESHOLD` | `0.2` | Min relevance; below this, RAG can refuse to answer. |
-| `QUERY_EXPANSION_MAX_QUERIES` | `3` | Max alternative queries when using Query Expansion in `/ask`. |
+| `SIMILARITY_THRESHOLD` | `0.35` | Max distance for retrieval; above this, chunks are filtered out. |
+| `QUERY_EXPANSION_MAX_QUERIES` | `3` | Max alternative queries when using **Query Expansion** in `/ask`. |
 
 ---
 
-## Collections
+## Collections & Schema-Driven Routing
 
-- **Ingest** and **search/ask** use a **collection name** (default from config, or overridden per request).
-- Use the **same** collection name when you ingest and when you search or ask, so the app looks in the right place.
-- **Clear** deletes only the specified (or default) collection, so you can reset one dataset without touching others.
+- **Ingestion:** No collection in the request. **Autonomous ingestion** classifies each file to an existing or new collection (or **unclassified_knowledge**). **Metadata extraction** enriches chunks using the **Schema Registry**.
+- **Search / Ask:** No collection in the request. **Collection routing** (LLM) and **schema-aware filter extraction** (LLM + **dynamic Pydantic validation**) determine the collection and **metadata filters**; retrieval uses Chroma **where** clauses when filters are present.
+- **Schema Registry** defines per-collection metadata fields and **schema hints**; **value normalizers** reduce zero-result errors from value mismatches.
