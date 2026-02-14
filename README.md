@@ -2,7 +2,7 @@
 
 A production-ready **Advanced RAG** API with **metadata filtering**, **schema-driven routing**, and **dynamic Pydantic validation**. Ingest PDFs and text via **autonomous ingestion**, run **semantic search** with **collection routing** and **metadata filters**, and get answers grounded only in your documents. Built with **embeddings**, **ChromaDB**, **Ollama** (llama3 + nomic-embed-text), **LCEL**, and a **Schema Registry** for multi-collection **metadata filtering**.
 
-**Keywords:** Advanced RAG · Metadata filtering · Dynamic Pydantic validation · Query expansion · Schema-driven routing · Autonomous ingestion · Collection routing · Schema Registry · ChromaDB · Ollama · LCEL · Retrieval-Augmented Generation · Semantic search · Multi-collection · Metadata extraction · Filter extraction · Grounded Q&A
+**Keywords:** Advanced RAG · Metadata filtering · Dynamic Pydantic validation · Query expansion · Schema-driven routing · Autonomous ingestion · Background workers · RabbitMQ · Idempotency · Content hashing · Worker pattern · ChromaDB · Ollama · LCEL · Retrieval-Augmented Generation · Semantic search · Multi-collection · Metadata extraction · Filter extraction · Grounded Q&A
 
 ---
 
@@ -10,7 +10,7 @@ A production-ready **Advanced RAG** API with **metadata filtering**, **schema-dr
 
 | Use case | How it's supported |
 |----------|---------------------|
-| **Autonomous document ingestion** | Upload files → **classify** (LLM, first 1,000 words) → **metadata extraction** (schema-aware LLM) → chunk → embed → store in ChromaDB. **Dynamic collection creation**; fallback to **unclassified_knowledge**. No collection parameter required. |
+| **Background ingestion (Worker pattern)** | Upload files → land in storage → **RabbitMQ** queue → **worker** picks up → **idempotency** (content hash; skip if duplicate) → parse, chunk, **metadata extraction**, embed → push to ChromaDB. If a 1,000-page PDF crashes the parser, the rest of the system keeps running. |
 | **Semantic search with metadata filtering** | `POST /search`: **collection routing** (LLM) → **schema-aware filter extraction** (LLM + **dynamic Pydantic validation**) → **metadata filtering** in ChromaDB → return snippets + scores. |
 | **Advanced RAG with Query Expansion** | `POST /ask` with `use_query_expansion: true`: **query expansion** (2–3 alternative phrasings) → retrieve for each → merge/dedupe → RAG answer. Improves recall. |
 | **Advanced RAG with metadata filtering** | `POST /ask`: **collection routing** → **filter extraction** (Schema Registry + **dynamic Pydantic validation**) → retrieval with **metadata filters** → **schema hints** in system prompt → grounded answer. |
@@ -44,30 +44,40 @@ A production-ready **Advanced RAG** API with **metadata filtering**, **schema-dr
 - **Query Expansion:** LLM generates 2–3 alternative phrasings (rephrasing, synonyms, sub-questions). We **retrieve for each** query, **merge and deduplicate** chunks, then run the same RAG prompt. Improves **recall**.
 - **Usage:** Set `use_query_expansion: true` in `POST /ask`. Config: `QUERY_EXPANSION_MAX_QUERIES` (default 3).
 
-### 5. Autonomous ingestion flow
+### 5. Background workers (RabbitMQ) & Worker pattern
+
+- **Flow:** A file lands in storage (`uploads/pending`) → API publishes a task to **RabbitMQ** → returns **202 Accepted** immediately. A **worker** process consumes the queue → picks up the file → **idempotency check** (content hash) → if new: parse, chunk, tag (metadata), push vectors to ChromaDB → record hash; if duplicate: skip. This ensures that if a 1,000-page PDF crashes the parser, only that job fails; the API and other workers keep running.
+- **Worker pattern:** Decouple heavy lifting from the API. Run one or more workers with `python scripts/ingestion_worker.py` (and RabbitMQ running). No collection parameter in the request; routing and metadata extraction happen inside the worker.
+
+### 6. Idempotency & hashing
+
+- Before processing, the worker computes a **SHA-256 hash** of the file content. If the hash exists in the **processed hashes** store (SQLite), the file is **skipped** to prevent duplicate data from poisoning search results. If you upload the same file twice, the second run is a no-op.
+- Processed hashes are stored in `data/processed_hashes.db` (configurable). Table: `content_hash`, `filename`, `collection_name`, `created_at`.
+
+### 7. Autonomous ingestion flow (inside the worker)
 
 - **Read & sample:** First 1,000 words of each document.
 - **Classify:** LLM compares content to **existing collections** (from ChromaDB); returns an existing collection name, a **new** collection name (snake_case, `_collection` suffix), or **UNCLASSIFIED**.
 - **Metadata extraction (Schema Registry):** If the collection has a schema (e.g. `policy_collection` → `city`, `department`), a small LLM call extracts those fields from the document and attaches them to **every chunk** (automatic metadata enrichment).
 - **Route:** Ingest into the chosen collection; **dynamic collection creation** if the name is new; **fallback** to **unclassified_knowledge** if UNCLASSIFIED.
 
-### 6. Embeddings & vector database (ChromaDB)
+### 8. Embeddings & vector database (ChromaDB)
 
 - Text → **vectors** via **Ollama** (**nomic-embed-text**). **ChromaDB** stores vectors with **persistence** (`./chroma_db`). **Collections** separate domains (policies, products, unclassified). **Metadata** on chunks enables **metadata filtering**.
 
-### 7. Recursive character chunking
+### 9. Recursive character chunking
 
 - **Chunk size** 1,000 characters, **overlap** 200 so boundary information isn’t lost. **RecursiveCharacterTextSplitter** (LangChain).
 
-### 8. Similarity score & thresholding
+### 10. Similarity score & thresholding
 
 - Chroma returns **distance** (lower = more similar). **Score threshold** filters out weak matches; RAG says "I cannot find that in the manual" when no chunk passes.
 
-### 9. System instructions & schema hints
+### 11. System instructions & schema hints
 
 - **Grounding:** System prompt instructs the LLM to use **only** the provided context. **Schema hints** (from the Schema Registry) are injected for the chosen collection so the AI knows which **metadata filters** apply (e.g. "Use city and department when the user mentions location or team").
 
-### 10. LCEL (LangChain Expression Language)
+### 12. LCEL (LangChain Expression Language)
 
 - RAG and query-expansion chains are built with **LCEL**: retriever → format docs → prompt → LLM → output. Composable and easy to extend.
 
@@ -79,7 +89,7 @@ A production-ready **Advanced RAG** API with **metadata filtering**, **schema-dr
 
 | # | Endpoint   | Method | Purpose |
 |---|------------|--------|---------|
-| 1 | `/ingest`  | POST   | **Autonomous ingestion**: classify → metadata extraction → chunk → embed → store. No collection in request. |
+| 1 | `/ingest`  | POST   | **Background ingestion**: save file → publish to **RabbitMQ** → **202 Accepted**. Worker does idempotency (hash), then classify → metadata extraction → chunk → embed → store. |
 | 2 | `/search`  | POST   | **Semantic search** with **collection routing** + **metadata filtering** (schema-aware filter extraction). |
 | 3 | `/ask`     | POST   | **Advanced RAG**: collection routing, **metadata filtering**, optional **Query Expansion**, **schema hints**. |
 | 4 | `/clear`   | DELETE | Wipe a collection (optional `?collection=...`). |
@@ -87,21 +97,29 @@ A production-ready **Advanced RAG** API with **metadata filtering**, **schema-dr
 
 ---
 
-### 1. `POST /ingest` (Autonomous ingestion)
+### 1. `POST /ingest` (Background ingestion — Worker pattern)
 
-**Purpose:** Turn PDFs or text files into searchable vectors with **autonomous collection routing** and **schema-aware metadata extraction**.
+**Purpose:** Upload files and **queue** them for background processing. Returns **202 Accepted** immediately. A **worker** (RabbitMQ consumer) does the heavy lifting: **idempotency** (content hash; skip duplicates), then classify → metadata extraction → chunk → embed → push to ChromaDB. If a large PDF crashes the parser, the API and other jobs keep running.
 
-**Flow:**
+**Flow (API):**
 
-1. Accept one or more files (multipart form: `files`). **No collection parameter** — routing is automatic.
-2. For each file: load (PyPDFLoader / TextLoader), take **first 1,000 words**, **classify** via LLM (existing collection, new name, or UNCLASSIFIED).
-3. **Metadata extraction:** If the chosen collection has a schema in the **Schema Registry**, run a small LLM call to extract fields (e.g. `city`, `department`) from the document and attach to all chunks.
-4. Chunk with **RecursiveCharacterTextSplitter**, embed with **Ollama**, add to **ChromaDB** in the chosen collection (creating it if new). **Fallback:** `unclassified_knowledge` if UNCLASSIFIED.
-5. Return `chunks_added`, `files_processed`, and **routing** (file → collection → chunks).
+1. Accept one or more files (multipart form: `files`). **No collection parameter**.
+2. Save each file to `uploads/pending/{task_id}_{filename}`.
+3. Publish one message per file to **RabbitMQ** queue `ingestion_tasks` (body: `task_id`, `file_path`, `filename`).
+4. Return **202 Accepted** with `tasks` (task_id and file name per file). If RabbitMQ is unavailable, return **503**.
+
+**Flow (Worker):**
+
+1. Consume message from queue; resolve file path (relative to project root).
+2. **Idempotency:** Compute **SHA-256** hash of file content. If hash is in `processed_hashes` (SQLite), **skip** and ack (prevents duplicate data from poisoning search).
+3. Otherwise: load file → **classify** (LLM, first 1,000 words) → **metadata extraction** (Schema Registry) → chunk → embed → add to ChromaDB → **record hash** → delete file → ack.
+4. On parser/LLM failure: nack (no requeue) so the message is not retried indefinitely.
 
 **Request:** Multipart form with `files` only.
 
-**Response:** `{ "status": "ok", "chunks_added": 12, "files_processed": 1, "routing": [ { "file": "policy.pdf", "collection": "policy_collection", "chunks": 12 } ] }`
+**Response (202 Accepted):** `{ "status": "accepted", "message": "Files queued for ingestion. A background worker will process them.", "tasks": [ { "task_id": "abc123", "file": "policy.pdf" } ] }`
+
+**Prerequisites:** RabbitMQ running (e.g. `docker run -d -p 5672:5672 rabbitmq:3`). At least one worker: `python scripts/ingestion_worker.py` (run from project root).
 
 ---
 
@@ -245,13 +263,23 @@ cp .env.example .env
 
 Edit `.env` if needed. Defaults: `OLLAMA_BASE_URL`, `OLLAMA_LLM_MODEL`, `OLLAMA_EMBEDDING_MODEL`, `DEFAULT_FALLBACK_COLLECTION=unclassified_knowledge`, etc.
 
-### 6. (Optional) Sample HR PDF
+### 6. RabbitMQ (for background ingestion)
+
+Start RabbitMQ (required for `POST /ingest` to queue tasks). Example with Docker:
+
+```bash
+docker run -d --name rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:3-management
+```
+
+Default URL: `amqp://guest:guest@localhost:5672/`. Override with `RABBITMQ_URL` in `.env` if needed.
+
+### 7. (Optional) Sample HR PDF
 
 ```bash
 python scripts/generate_sample_hr_pdf.py
 ```
 
-### 7. Run the API
+### 8. Run the API
 
 ```bash
 python main.py
@@ -266,10 +294,20 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 - **API docs (Swagger):** http://localhost:8000/docs  
 - **Health:** http://localhost:8000/status  
 
-### 8. Quick test
+### 9. Run the ingestion worker
+
+From the **project root**, start at least one worker so queued files are actually processed:
+
+```bash
+python scripts/ingestion_worker.py
+```
+
+Leave it running. It consumes from the `ingestion_tasks` queue, hashes files for **idempotency**, then parses, chunks, and pushes to ChromaDB.
+
+### 10. Quick test
 
 1. **GET** http://localhost:8000/status → expect `ollama` and `chromadb` online.
-2. **POST /ingest** → upload a PDF (no collection param; **autonomous ingestion**).
+2. **POST /ingest** → upload a PDF; expect **202 Accepted** and `tasks` with `task_id`. (Worker must be running to process the file.)
 3. **POST /search** → `{ "query": "paternity leave", "k": 5 }` (collection and **metadata filtering** resolved automatically).
 4. **POST /ask** → `{ "question": "How much paternity leave do I get?" }` or with `"use_query_expansion": true` for **Query Expansion**.
 
@@ -285,7 +323,9 @@ Semantic-RAG-Knowledge-Engine/
 │   ├── embeddings.py      # Ollama embeddings (nomic-embed-text)
 │   ├── vector_store.py    # ChromaDB: list collections, retriever with metadata filter
 │   ├── chunking.py        # RecursiveCharacterTextSplitter (1000 / 200)
-│   ├── ingestion.py       # Autonomous ingestion: classify, metadata extraction, chunk, store
+│   ├── ingestion.py       # Autonomous ingestion logic: classify, metadata extraction, chunk, store (used by worker)
+│   ├── idempotency.py     # Content hashing (SHA-256) and SQLite store for duplicate detection
+│   ├── messaging.py       # RabbitMQ: publish ingestion tasks, consume loop for worker
 │   ├── schema_registry.py # Schema Registry: collection schemas, dynamic Pydantic, normalizers
 │   ├── filter_extraction.py # Schema-aware filter extraction from user query (dynamic Pydantic validation)
 │   ├── prompts.py        # RAG, classification, metadata extraction, filter extraction, schema hints
@@ -293,14 +333,15 @@ Semantic-RAG-Knowledge-Engine/
 │   ├── rag.py             # LCEL RAG chain (+ query expansion), ask_rag with schema_hint
 │   └── llm.py             # Chat model (Ollama llama3)
 ├── scripts/
-│   └── generate_sample_hr_pdf.py
-├── data/
+│   ├── generate_sample_hr_pdf.py
+│   └── ingestion_worker.py # RabbitMQ consumer: hash → idempotency check → parse/chunk/tag → ChromaDB
+├── data/                  # processed_hashes.db (idempotency), optional PDFs
 ├── requirements.txt
 ├── .env.example
 └── README.md
 ```
 
-Runtime-created (in `.gitignore`): `uploads/`, `chroma_db/`, `.venv/`, `.env`.
+Runtime-created (in `.gitignore`): `uploads/`, `chroma_db/`, `data/processed_hashes.db`, `.venv/`, `.env`.
 
 ---
 
@@ -318,6 +359,9 @@ Runtime-created (in `.gitignore`): `uploads/`, `chroma_db/`, `.venv/`, `.env`.
 | `CHUNK_OVERLAP` | `200` | Overlap between chunks. |
 | `SIMILARITY_THRESHOLD` | `0.35` | Max distance for retrieval; above this, chunks are filtered out. |
 | `QUERY_EXPANSION_MAX_QUERIES` | `3` | Max alternative queries when using **Query Expansion** in `/ask`. |
+| `RABBITMQ_URL` | `amqp://guest:guest@localhost:5672/` | RabbitMQ connection URL for ingestion queue. |
+| `INGESTION_QUEUE_NAME` | `ingestion_tasks` | Queue name for background ingestion tasks. |
+| `PROCESSED_HASHES_DB` | `./data/processed_hashes.db` | SQLite DB for **idempotency** (processed content hashes). |
 
 ---
 

@@ -2,22 +2,26 @@
 Enterprise Knowledge Engine - Production RAG API.
 
 Endpoints:
-  POST /ingest   - Upload and process files (PDFs/Text) into searchable vectors
+  POST /ingest   - Upload files → queue for background worker (RabbitMQ); 202 Accepted
   POST /search   - Semantic search (relevant snippets)
   POST /ask      - Full RAG: search + LLM answer
   DELETE /clear  - Wipe the vector database
   GET  /status   - Health: Ollama and ChromaDB
+
+Ingestion uses the Worker pattern: file lands in storage → worker picks up from
+RabbitMQ → parse, chunk, tag, push to ChromaDB. Idempotency via content hashing.
 """
+import uuid
 from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, File, HTTPException, UploadFile, Query
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from config import get_settings
 from app.filter_extraction import extract_filters_from_query
-from app.ingestion import ingest_files, classify_query_to_collection
+from app.ingestion import classify_query_to_collection
+from app.messaging import publish_ingest_task
 from app.rag import build_rag_chain, build_rag_chain_with_query_expansion, ask_rag
 from app.schema_registry import get_schema_hint_for_rag
 from app.vector_store import get_vector_store, get_retriever, list_collection_names, clear_collection
@@ -57,6 +61,7 @@ def _collection(collection: str | None) -> str:
 
 def _ensure_upload_dir():
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
+    settings.upload_pending_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _get_vector_store(collection: str):
@@ -110,59 +115,57 @@ async def status():
     }
 
 
-# Autonomous ingestion: no collection parameter. Each file is classified (first 1000 words)
-# into an existing or new collection, or routed to the default fallback collection.
+# Worker pattern: file lands in storage → RabbitMQ → worker parses, chunks, tags, pushes to ChromaDB.
+# Idempotency: worker hashes file content; duplicates are skipped to avoid poisoning search.
 
-@app.post("/ingest")
+@app.post("/ingest", status_code=202)
 async def ingest(files: list[UploadFile] = File(...)):
     """
-    Upload and process files (PDFs/Text). Autonomous flow: for each file, the system
-    reads the first 1,000 words, classifies it against known collections (or suggests
-    a new one), then chunks and embeds into that collection. Unclassifiable docs
-    go to the default fallback collection (unclassified_knowledge).
+    Upload files and queue them for background ingestion (RabbitMQ). Returns 202 Accepted.
+    A worker picks up each file: content hash (idempotency) → if new, parse, chunk,
+    metadata extraction, embed, push to ChromaDB. Duplicate content (same hash) is skipped.
+    If a large PDF crashes the parser, only that job fails; the rest of the system keeps running.
     """
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
     _ensure_upload_dir()
-    saved: list[Path] = []
-    try:
-        for u in files:
-            suffix = Path(u.filename or "").suffix.lower()
-            if suffix not in (".pdf", ".txt", ".text"):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Unsupported file type: {u.filename}. Use .pdf or .txt",
-                )
-            path = settings.upload_dir / (u.filename or "upload")
-            path.write_bytes(await u.read())
-            saved.append(path)
-        llm = get_chat_model(
-            base_url=settings.ollama_base_url,
-            model=settings.ollama_llm_model,
-        )
-        result = ingest_files(
-            file_paths=saved,
-            persist_directory=settings.chroma_persist_dir,
-            fallback_collection=settings.default_fallback_collection,
-            llm=llm,
-            chunk_size=settings.chunk_size,
-            chunk_overlap=settings.chunk_overlap,
-            sample_words=1000,
-            ollama_base_url=settings.ollama_base_url,
-            ollama_embedding_model=settings.ollama_embedding_model,
-        )
-        return {
-            "status": "ok",
-            "chunks_added": result["chunks_added"],
-            "files_processed": result["files_processed"],
-            "routing": result["routing"],
-        }
-    finally:
-        for p in saved:
+    tasks: list[dict] = []
+    for u in files:
+        suffix = Path(u.filename or "").suffix.lower()
+        if suffix not in (".pdf", ".txt", ".text"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file type: {u.filename}. Use .pdf or .txt",
+            )
+        task_id = uuid.uuid4().hex
+        safe_name = (u.filename or "upload").replace(" ", "_")
+        path = settings.upload_pending_dir / f"{task_id}_{safe_name}"
+        path.write_bytes(await u.read())
+        # Relative path so worker (run from project root) can resolve it
+        rel_path = f"uploads/pending/{task_id}_{safe_name}"
+        try:
+            publish_ingest_task(
+                file_path=rel_path,
+                filename=u.filename or "upload",
+                task_id=task_id,
+                rabbitmq_url=settings.rabbitmq_url,
+                queue_name=settings.ingestion_queue_name,
+            )
+        except Exception as e:
             try:
-                p.unlink()
+                path.unlink()
             except Exception:
                 pass
+            raise HTTPException(
+                status_code=503,
+                detail=f"Queue unavailable. Ensure RabbitMQ is running. Error: {e}",
+            )
+        tasks.append({"task_id": task_id, "file": u.filename or "upload"})
+    return {
+        "status": "accepted",
+        "message": "Files queued for ingestion. A background worker will process them.",
+        "tasks": tasks,
+    }
 
 
 @app.post("/search")

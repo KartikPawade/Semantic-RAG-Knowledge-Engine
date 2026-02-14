@@ -22,7 +22,13 @@ class Settings(BaseSettings):
     # Paths
     chroma_persist_dir: str = "./chroma_db"
     upload_dir: Path = Path("./uploads")
+    upload_pending_dir: Path = Path("./uploads/pending")  # Queued files for workers
     data_dir: Path = Path("./data")
+    processed_hashes_db: Path = Path("./data/processed_hashes.db")  # Idempotency store
+
+    # Background workers (RabbitMQ)
+    rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
+    ingestion_queue_name: str = "ingestion_tasks"
 
     # Collection management: default for search/ask when no collection specified
     default_collection: str = "hr_manual"

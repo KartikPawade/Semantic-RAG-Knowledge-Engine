@@ -20,6 +20,9 @@ pypdf>=4.0.0
 
 # Local LLM & embeddings via Ollama (langchain-ollama talks to Ollama server)
 
+# Background workers
+pika>=1.3.0
+
 # Utilities
 pydantic>=2.5.0
 pydantic-settings>=2.1.0
