@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     # Similarity threshold: if top result < this, say "I don't know"
     similarity_threshold: float = 0.2
 
+    # Query Expansion (Advanced RAG): max alternative queries to generate
+    query_expansion_max_queries: int = 3
+
     @property
     def chroma_path(self) -> Path:
         return Path(self.chroma_persist_dir).resolve()

@@ -4,6 +4,19 @@ A production-ready **Retrieval-Augmented Generation (RAG)** API: ingest PDFs and
 
 ---
 
+## Use Cases
+
+| Use case | How it’s supported |
+|----------|---------------------|
+| **Document ingestion** | Upload PDFs or text → chunk (recursive character) → embed (Ollama) → store in ChromaDB. Separate collections (e.g. `hr_manual`, `engineering_docs`) for different domains. |
+| **Semantic search** | `POST /search`: embed the query, run similarity search over stored chunks, return snippets + scores (no LLM). Good for testing retrieval. |
+| **Grounded Q&A (RAG)** | `POST /ask`: retrieve relevant chunks → augment prompt with context → LLM answers only from context; says “I cannot find that in the manual” when not in docs. |
+| **Advanced RAG – Query Expansion** | `POST /ask` with `use_query_expansion: true`: expand the question into 2–3 alternative phrasings → retrieve for each → merge/dedupe docs → same RAG answer. Improves recall when user wording differs from the document. |
+| **Collection management** | Ingest/search/ask target a collection (default or per request). `DELETE /clear` wipes one collection for testing. |
+| **Health / ops** | `GET /status`: check Ollama and ChromaDB availability. |
+
+---
+
 ## Concepts Used in This Project
 
 ### 1. Embeddings (the “language of numbers”)
@@ -41,6 +54,12 @@ A production-ready **Retrieval-Augmented Generation (RAG)** API: ingest PDFs and
 ### 7. LCEL (LangChain Expression Language)
 
 - The RAG pipeline is built as a **chain** using LCEL: retriever → format docs → prompt → LLM → output. Composable and easy to extend.
+
+### 8. Query Expansion (Advanced RAG)
+
+- **Problem:** A user might ask “How much paternity leave do I get?” while the document says “Fathers are entitled to 2 weeks paid leave.” Single-query retrieval can miss the chunk if phrasing differs.
+- **Query Expansion:** The LLM generates 2–3 alternative phrasings (rephrasing, synonyms, or sub-questions) from the user question. We run **retrieval for each** expanded query, **merge and deduplicate** the documents, then pass the combined context to the same RAG prompt and LLM. This improves **recall** without changing how the answer is grounded.
+- **Usage:** Set `use_query_expansion: true` in the `POST /ask` request body. Config: `QUERY_EXPANSION_MAX_QUERIES` (default 3).
 
 ---
 
@@ -95,17 +114,20 @@ A production-ready **Retrieval-Augmented Generation (RAG)** API: ingest PDFs and
 
 ### 3. `POST /ask`
 
-**Purpose:** Full RAG: answer a question using only your ingested documents.
+**Purpose:** Full RAG: answer a question using only your ingested documents. Optional **Query Expansion** for better recall.
 
 **Flow:**
 
-1. Accept JSON body: `question`, optional `collection`.
-2. **Retrieve** top-k chunks above the similarity threshold (retriever with score_threshold).
-3. **Format** chunks into a single context string.
-4. **Prompt** the LLM (Ollama llama3) with system instructions: “Use only the provided context; if not found, say I cannot find that in the manual.”
-5. **Generate** and return the answer.
+1. Accept JSON body: `question`, optional `collection`, optional `use_query_expansion` (default `false`).
+2. If `use_query_expansion` is `true`: **expand** the question into 2–3 alternative queries (LLM), **retrieve** for each query, **merge and dedupe** chunks.
+3. Otherwise: **Retrieve** top-k chunks above the similarity threshold (retriever with score_threshold).
+4. **Format** chunks into a single context string.
+5. **Prompt** the LLM (Ollama llama3) with system instructions: “Use only the provided context; if not found, say I cannot find that in the manual.”
+6. **Generate** and return the answer.
 
-**Request body:** `{ "question": "How much paternity leave do I get?", "collection": null }`
+**Request body (basic):** `{ "question": "How much paternity leave do I get?", "collection": null }`
+
+**Request body (with Query Expansion):** `{ "question": "How much paternity leave do I get?", "collection": null, "use_query_expansion": true }`
 
 **Response:** `{ "question": "...", "answer": "Paternity Leave is 2 weeks paid leave..." }`
 
@@ -236,13 +258,14 @@ Semantic-RAG-Knowledge-Engine/
 ├── main.py              # FastAPI app and 5 endpoints
 ├── config.py            # Settings (Ollama, chunk size, threshold, paths)
 ├── app/
-│   ├── embeddings.py    # Ollama embeddings (nomic-embed-text)
-│   ├── vector_store.py  # ChromaDB: persistence, collections, retriever
-│   ├── chunking.py      # RecursiveCharacterTextSplitter (1000 / 200)
-│   ├── ingestion.py     # PyPDFLoader + chunk + store
-│   ├── prompts.py       # System instructions (grounding)
-│   ├── rag.py           # LCEL RAG chain
-│   └── llm.py           # Chat model (Ollama llama3)
+│   ├── embeddings.py       # Ollama embeddings (nomic-embed-text)
+│   ├── vector_store.py     # ChromaDB: persistence, collections, retriever
+│   ├── chunking.py         # RecursiveCharacterTextSplitter (1000 / 200)
+│   ├── ingestion.py        # PyPDFLoader + chunk + store
+│   ├── prompts.py          # System instructions (grounding)
+│   ├── query_expansion.py  # Advanced RAG: expand question into multiple queries
+│   ├── rag.py              # LCEL RAG chain (+ query expansion chain)
+│   └── llm.py              # Chat model (Ollama llama3)
 ├── scripts/
 │   └── generate_sample_hr_pdf.py
 ├── data/                # Optional sample PDFs
@@ -267,6 +290,7 @@ Runtime-created (and in `.gitignore`): `uploads/`, `chroma_db/`, `.venv/`, `.env
 | `CHUNK_SIZE` | `1000` | Characters per chunk. |
 | `CHUNK_OVERLAP` | `200` | Overlap between chunks. |
 | `SIMILARITY_THRESHOLD` | `0.2` | Min relevance; below this, RAG can refuse to answer. |
+| `QUERY_EXPANSION_MAX_QUERIES` | `3` | Max alternative queries when using Query Expansion in `/ask`. |
 
 ---
 

@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from config import get_settings
 from app.ingestion import ingest_files
-from app.rag import build_rag_chain, ask_rag
+from app.rag import build_rag_chain, build_rag_chain_with_query_expansion, ask_rag
 from app.vector_store import get_vector_store, get_retriever, clear_collection
 from app.llm import get_chat_model
 
@@ -42,6 +42,10 @@ class SearchRequest(BaseModel):
 class AskRequest(BaseModel):
     question: str = Field(..., description="Question for the RAG assistant")
     collection: str | None = Field(None, description="Collection name (default from config)")
+    use_query_expansion: bool = Field(
+        False,
+        description="Use Query Expansion: generate alternative phrasings and retrieve for each (better recall)",
+    )
 
 
 # ----- Helpers -----
@@ -172,6 +176,7 @@ async def ask(body: AskRequest):
     """
     Full RAG: search + Ollama (llama3) answer. Uses only provided context; says
     "I cannot find that in the manual" when the answer is not in the docs.
+    Set use_query_expansion=true for Advanced RAG (Query Expansion) to improve recall.
     """
     vs = _get_vector_store(body.collection)
     retriever = get_retriever(
@@ -183,7 +188,12 @@ async def ask(body: AskRequest):
         base_url=settings.ollama_base_url,
         model=settings.ollama_llm_model,
     )
-    chain = build_rag_chain(retriever, llm)
+    if body.use_query_expansion:
+        chain = build_rag_chain_with_query_expansion(
+            retriever, llm, max_expanded_queries=settings.query_expansion_max_queries
+        )
+    else:
+        chain = build_rag_chain(retriever, llm)
     answer = ask_rag(chain, body.question)
     return {"question": body.question, "answer": answer}
 
