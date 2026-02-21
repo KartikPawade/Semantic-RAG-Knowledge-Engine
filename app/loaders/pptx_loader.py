@@ -38,9 +38,18 @@ class PptxLoader(BaseLoader):
             for shape in slide.shapes:
                 if shape.has_text_frame:
                     text = shape.text_frame.text.strip()
-                    if shape.shape_type == 13:  # MSO_SHAPE_TYPE.TITLE
-                        title = text
-                    elif text:
+                    if not text:
+                        continue
+                    # Title: placeholder with idx 0 (python-pptx); shape_type 13 is PICTURE, not TITLE
+                    if getattr(shape, "is_placeholder", False):
+                        try:
+                            if shape.placeholder_format.idx == 0:
+                                title = text
+                            else:
+                                parts.append(text)
+                        except (ValueError, AttributeError):
+                            parts.append(text)
+                    else:
                         parts.append(text)
 
                 if shape.has_table:

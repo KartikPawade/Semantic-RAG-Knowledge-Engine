@@ -13,6 +13,7 @@ RabbitMQ → parse, chunk, tag, push to ChromaDB. Idempotency via content hashin
 """
 import logging
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -30,20 +31,23 @@ from app.schema_registry import get_schema_hint_for_rag
 from app.vector_store import get_vector_store, get_retriever, list_collection_names, clear_collection
 from langchain_chroma import Chroma
 
-app = FastAPI(
-    title="Enterprise Knowledge Engine",
-    description="Production RAG: ingest PDFs, semantic search, and grounded Q&A.",
-    version="1.0.0",
-)
-
 setup_logging()
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
 
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     app.state.provider = get_provider(settings)
+    yield
+
+
+app = FastAPI(
+    title="Enterprise Knowledge Engine",
+    description="Production RAG: ingest PDFs, semantic search, and grounded Q&A.",
+    version="1.0.0",
+    lifespan=lifespan,
+)
 
 
 # ----- Request/Response models -----
@@ -195,15 +199,23 @@ async def search(body: SearchRequest):
     Semantic search with schema-driven filters. Step 1: route query to a
     collection. Step 2: extract metadata filters from the query using that
     collection's schema; search runs on that collection with filter (or none).
+    Results are filtered by similarity_threshold (same as /ask) so only
+    sufficiently relevant snippets are returned.
     """
     fast_llm = app.state.provider.get_fast_model()
-    collection = _resolve_collection_for_query(body.query, fast_llm)
-    chroma_filter = extract_filters_from_query(body.query, collection, fast_llm)
+    collection = await _resolve_collection_for_query(body.query, fast_llm)
+    chroma_filter = await extract_filters_from_query_async(body.query, collection, fast_llm)
     vs = _get_vector_store(collection)
     search_kwargs: dict = {"k": body.k}
     if chroma_filter:
         search_kwargs["filter"] = chroma_filter
     results = vs.similarity_search_with_score(body.query, **search_kwargs)
+    # Apply same relevance threshold as /ask: filter out weak matches (Chroma returns distance; lower = more similar)
+    results = [
+        (doc, score)
+        for doc, score in results
+        if score <= settings.similarity_threshold
+    ]
     snippets = [
         {
             "content": doc.page_content,

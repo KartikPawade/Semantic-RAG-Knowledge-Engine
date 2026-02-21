@@ -27,6 +27,15 @@ from app.messaging import consume_ingest_tasks
 setup_logging()
 logger = logging.getLogger(__name__)
 
+_provider = None
+
+
+def _get_provider():
+    global _provider
+    if _provider is None:
+        _provider = get_provider(get_settings())
+    return _provider
+
 
 def process_one_task(data: dict, channel, method) -> None:
     settings = get_settings()
@@ -59,7 +68,7 @@ def process_one_task(data: dict, channel, method) -> None:
 
     logger.info("Processing task", extra={"task_id": task_id, "file": filename})
     try:
-        provider = get_provider(settings)
+        provider = _get_provider()
         llm = provider.get_fast_model()
         embedding_model = provider.get_embedding_model()
 
