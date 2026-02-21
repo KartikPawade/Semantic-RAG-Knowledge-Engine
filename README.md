@@ -47,7 +47,7 @@ A production-ready **Advanced RAG** API with **metadata filtering**, **schema-dr
 ### 5. Background workers (RabbitMQ) & Worker pattern
 
 - **Flow:** A file lands in storage (`uploads/pending`) → API publishes a task to **RabbitMQ** → returns **202 Accepted** immediately. A **worker** process consumes the queue → picks up the file → **idempotency check** (content hash) → if new: parse, chunk, tag (metadata), push vectors to ChromaDB → record hash; if duplicate: skip. This ensures that if a 1,000-page PDF crashes the parser, only that job fails; the API and other workers keep running.
-- **Worker pattern:** Decouple heavy lifting from the API. Run one or more workers with `python scripts/ingestion_worker.py` (and RabbitMQ running). No collection parameter in the request; routing and metadata extraction happen inside the worker.
+- **Worker pattern:** Decouple heavy lifting from the API. Run one or more workers with `python worker.py` from the project root (and RabbitMQ running). No collection parameter in the request; routing and metadata extraction happen inside the worker.
 
 ### 6. Idempotency & hashing
 
@@ -119,7 +119,7 @@ A production-ready **Advanced RAG** API with **metadata filtering**, **schema-dr
 
 **Response (202 Accepted):** `{ "status": "accepted", "message": "Files queued for ingestion. A background worker will process them.", "tasks": [ { "task_id": "abc123", "file": "policy.pdf" } ] }`
 
-**Prerequisites:** RabbitMQ running (e.g. `docker run -d -p 5672:5672 rabbitmq:3`). At least one worker: `python scripts/ingestion_worker.py` (run from project root).
+**Prerequisites:** RabbitMQ running (e.g. `docker run -d -p 5672:5672 rabbitmq:3`). At least one worker: `python worker.py` (run from project root).
 
 ---
 
@@ -169,9 +169,9 @@ A production-ready **Advanced RAG** API with **metadata filtering**, **schema-dr
 
 ### 5. `GET /status`
 
-**Purpose:** Check Ollama and ChromaDB availability.
+**Purpose:** Check Ollama (and that configured LLM/embedding models are pulled), and ChromaDB availability.
 
-**Response:** `{ "ollama": "online" | "offline", "chromadb": "online" | "offline" }`
+**Response:** `{ "ollama": "online" | "offline", "models": "ok" | "missing: [list]", "chromadb": "online" | "offline" }`
 
 ---
 
@@ -299,7 +299,7 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 From the **project root**, start at least one worker so queued files are actually processed:
 
 ```bash
-python scripts/ingestion_worker.py
+python worker.py
 ```
 
 Leave it running. It consumes from the `ingestion_tasks` queue, hashes files for **idempotency**, then parses, chunks, and pushes to ChromaDB.
@@ -318,25 +318,28 @@ Leave it running. It consumes from the `ingestion_tasks` queue, hashes files for
 ```
 Semantic-RAG-Knowledge-Engine/
 ├── main.py                 # FastAPI app: ingest, search, ask, clear, status
-├── config.py               # Settings (Ollama, chunks, similarity threshold, fallback collection)
+├── config.py               # Settings (provider, Ollama/OpenAI, chunks, similarity threshold)
+├── worker.py               # Ingestion worker: RabbitMQ consumer → hash → idempotency → parse/chunk/tag → ChromaDB
 ├── app/
-│   ├── embeddings.py      # Ollama embeddings (nomic-embed-text)
-│   ├── vector_store.py    # ChromaDB: list collections, retriever with metadata filter
-│   ├── chunking.py        # RecursiveCharacterTextSplitter (1000 / 200)
-│   ├── ingestion.py       # Autonomous ingestion logic: classify, metadata extraction, chunk, store (used by worker)
-│   ├── idempotency.py     # Content hashing (SHA-256) and SQLite store for duplicate detection
-│   ├── messaging.py       # RabbitMQ: publish ingestion tasks, consume loop for worker
-│   ├── schema_registry.py # Schema Registry: collection schemas, dynamic Pydantic, normalizers
-│   ├── filter_extraction.py # Schema-aware filter extraction from user query (dynamic Pydantic validation)
-│   ├── prompts.py        # RAG, classification, metadata extraction, filter extraction, schema hints
-│   ├── query_expansion.py # Advanced RAG: expand question into multiple queries
-│   ├── rag.py             # LCEL RAG chain (+ query expansion), ask_rag with schema_hint
-│   └── llm.py             # Chat model (Ollama llama3)
+│   ├── providers/          # LLM + embedding abstraction (OpenAI, Ollama)
+│   ├── loaders/            # Format-specific document loaders (PDF, DOCX, Excel, etc.)
+│   ├── chunkers/           # Format-aware chunking (dispatcher, table, slide, semantic, etc.)
+│   ├── vector_store.py     # ChromaDB: list collections, retriever with metadata filter
+│   ├── ingestion.py        # Autonomous ingestion: classify, metadata extraction, chunk, store
+│   ├── idempotency.py      # Content hashing (SHA-256) and SQLite store for duplicate detection
+│   ├── messaging.py        # RabbitMQ: publish (with retry), consume loop for worker
+│   ├── schema_registry.py  # Schema Registry: collection schemas, dynamic Pydantic, normalizers
+│   ├── filter_extraction.py # Schema-aware filter extraction from user query
+│   ├── prompts.py          # RAG, classification, metadata extraction, filter extraction
+│   ├── query_expansion.py  # Advanced RAG: expand question into multiple queries
+│   ├── rag.py              # LCEL RAG chain (+ query expansion), ask_rag with schema_hint
+│   └── logging_config.py   # Structured JSON logging
 ├── scripts/
-│   ├── generate_sample_hr_pdf.py
-│   └── ingestion_worker.py # RabbitMQ consumer: hash → idempotency check → parse/chunk/tag → ChromaDB
-├── data/                  # processed_hashes.db (idempotency), optional PDFs
+│   └── generate_sample_hr_pdf.py
+├── tests/                  # Unit tests (schema registry, chunkers, idempotency, routing)
+├── data/                   # processed_hashes.db (idempotency), optional PDFs
 ├── requirements.txt
+├── requirements-dev.txt    # pytest for tests
 ├── .env.example
 └── README.md
 ```

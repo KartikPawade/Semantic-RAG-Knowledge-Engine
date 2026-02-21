@@ -6,6 +6,7 @@ parsed, chunked, tagged, vectors pushed to ChromaDB. Keeps the API responsive
 and isolates heavy/crashing jobs from the rest of the system.
 """
 import json
+import time
 import uuid
 
 import pika
@@ -24,28 +25,41 @@ def publish_ingest_task(
     task_id: str | None = None,
     rabbitmq_url: str = "amqp://guest:guest@localhost:5672/",
     queue_name: str = "ingestion_tasks",
+    max_retries: int = 3,
+    retry_delay: float = 0.5,
 ) -> str:
     """
     Publish one ingestion task to RabbitMQ. Returns task_id.
+    Retries with exponential backoff if RabbitMQ is briefly unavailable.
     Worker will: read file → hash → idempotency check → parse/chunk/embed → record hash.
     """
     task_id = task_id or uuid.uuid4().hex
     payload = IngestTaskPayload(task_id=task_id, file_path=file_path, filename=filename)
     body = payload.model_dump_json()
     params = pika.URLParameters(rabbitmq_url)
-    conn = pika.BlockingConnection(params)
-    try:
-        ch = conn.channel()
-        ch.queue_declare(queue=queue_name, durable=True)
-        ch.basic_publish(
-            exchange="",
-            routing_key=queue_name,
-            body=body,
-            properties=pika.BasicProperties(delivery_mode=2),
-        )
-        return task_id
-    finally:
-        conn.close()
+
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            conn = pika.BlockingConnection(params)
+            try:
+                ch = conn.channel()
+                ch.queue_declare(queue=queue_name, durable=True)
+                ch.basic_publish(
+                    exchange="",
+                    routing_key=queue_name,
+                    body=body,
+                    properties=pika.BasicProperties(delivery_mode=2),
+                )
+                return task_id
+            finally:
+                conn.close()
+        except Exception as exc:
+            last_exc = exc
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay * (2**attempt))
+
+    raise last_exc
 
 
 def consume_ingest_tasks(

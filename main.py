@@ -11,6 +11,7 @@ Endpoints:
 Ingestion uses the Worker pattern: file lands in storage → worker picks up from
 RabbitMQ → parse, chunk, tag, push to ChromaDB. Idempotency via content hashing.
 """
+import logging
 import uuid
 from pathlib import Path
 
@@ -19,13 +20,15 @@ from fastapi import FastAPI, File, HTTPException, UploadFile, Query
 from pydantic import BaseModel, Field
 
 from config import get_settings, get_provider
-from app.filter_extraction import extract_filters_from_query
-from app.ingestion import classify_query_to_collection
+from app.filter_extraction import extract_filters_from_query_async
+from app.logging_config import setup_logging
+from app.ingestion import classify_query_to_collection_async
 from app.loaders import SUPPORTED_EXTENSIONS
 from app.messaging import publish_ingest_task
 from app.rag import build_rag_chain, build_rag_chain_with_query_expansion, ask_rag
 from app.schema_registry import get_schema_hint_for_rag
 from app.vector_store import get_vector_store, get_retriever, list_collection_names, clear_collection
+from langchain_chroma import Chroma
 
 app = FastAPI(
     title="Enterprise Knowledge Engine",
@@ -33,7 +36,9 @@ app = FastAPI(
     version="1.0.0",
 )
 
+setup_logging()
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 @app.on_event("startup")
@@ -69,22 +74,28 @@ def _ensure_upload_dir():
     settings.upload_pending_dir.mkdir(parents=True, exist_ok=True)
 
 
-def _get_vector_store(collection: str):
-    embedding = app.state.provider.get_embedding_model()
-    return get_vector_store(
-        persist_directory=settings.chroma_persist_dir,
-        collection_name=collection,
-        embedding=embedding,
-    )
+_vector_store_cache: dict[tuple[str, str], Chroma] = {}
 
 
-def _resolve_collection_for_query(user_query: str, llm) -> str:
+def _get_vector_store(collection: str) -> Chroma:
+    key = (str(settings.chroma_persist_dir), collection)
+    if key not in _vector_store_cache:
+        embedding = app.state.provider.get_embedding_model()
+        _vector_store_cache[key] = get_vector_store(
+            persist_directory=settings.chroma_persist_dir,
+            collection_name=collection,
+            embedding=embedding,
+        )
+    return _vector_store_cache[key]
+
+
+async def _resolve_collection_for_query(user_query: str, llm) -> str:
     """
     Route user query to a single collection via LLM (like document classification).
     Returns existing collection name or default_fallback_collection if none match.
     """
     existing = list_collection_names(settings.chroma_persist_dir)
-    return classify_query_to_collection(
+    return await classify_query_to_collection_async(
         user_query=user_query,
         existing_collections=existing,
         fallback_collection=settings.default_fallback_collection,
@@ -98,13 +109,21 @@ def _resolve_collection_for_query(user_query: str, llm) -> str:
 @app.get("/status")
 async def status():
     """
-    Check if Ollama and ChromaDB are online.
+    Check if Ollama (and configured models), and ChromaDB are online.
+    When using Ollama, verifies that the configured LLM and embedding models are pulled.
     """
     ollama_ok = False
+    models_ok = False
+    missing_models: list[str] = []
     chroma_ok = False
     try:
         r = httpx.get(f"{settings.ollama_base_url.rstrip('/')}/api/tags", timeout=2.0)
-        ollama_ok = r.status_code == 200
+        if r.status_code == 200:
+            ollama_ok = True
+            available = {m["name"].split(":")[0] for m in r.json().get("models", [])}
+            required = {settings.ollama_llm_model, settings.ollama_embedding_model}
+            missing_models = sorted(required - available)
+            models_ok = not missing_models
     except Exception:
         pass
     try:
@@ -113,9 +132,10 @@ async def status():
         client.heartbeat()
         chroma_ok = True
     except Exception:
-        chroma_ok = False
+        pass
     return {
         "ollama": "online" if ollama_ok else "offline",
+        "models": "ok" if models_ok else f"missing: {missing_models}",
         "chromadb": "online" if chroma_ok else "offline",
     }
 
@@ -157,13 +177,9 @@ async def ingest(files: list[UploadFile] = File(...)):
                 queue_name=settings.ingestion_queue_name,
             )
         except Exception as e:
-            try:
-                path.unlink()
-            except Exception:
-                pass
             raise HTTPException(
                 status_code=503,
-                detail=f"Queue unavailable. Ensure RabbitMQ is running. Error: {e}",
+                detail=f"Queue unavailable. File saved at {rel_path}. Ensure RabbitMQ is running. Error: {e}",
             )
         tasks.append({"task_id": task_id, "file": u.filename or "upload"})
     return {
@@ -209,8 +225,8 @@ async def ask(body: AskRequest):
     provider = app.state.provider
     fast_llm = provider.get_fast_model()
     llm = provider.get_chat_model()
-    collection = _resolve_collection_for_query(body.question, fast_llm)
-    chroma_filter = extract_filters_from_query(body.question, collection, fast_llm)
+    collection = await _resolve_collection_for_query(body.question, fast_llm)
+    chroma_filter = await extract_filters_from_query_async(body.question, collection, fast_llm)
     vs = _get_vector_store(collection)
     retriever = get_retriever(
         vs,
@@ -218,7 +234,7 @@ async def ask(body: AskRequest):
         score_threshold=settings.similarity_threshold,
         filter=chroma_filter,
     )
-    schema_hint = get_schema_hint_for_rag([collection])
+    schema_hint = get_schema_hint_for_rag(collection)
     if body.use_query_expansion:
         chain = build_rag_chain_with_query_expansion(
             retriever, llm, max_expanded_queries=settings.query_expansion_max_queries
@@ -236,11 +252,13 @@ async def clear(
     """
     Wipe the vector database (default collection). Use for reset during testing.
     """
+    coll = _collection(collection)
     clear_collection(
         persist_directory=settings.chroma_persist_dir,
-        collection_name=_collection(collection),
+        collection_name=coll,
     )
-    return {"status": "ok", "message": f"Collection '{_collection(collection)}' cleared."}
+    _vector_store_cache.pop((str(settings.chroma_persist_dir), coll), None)
+    return {"status": "ok", "message": f"Collection '{coll}' cleared."}
 
 
 if __name__ == "__main__":

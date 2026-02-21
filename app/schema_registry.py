@@ -77,20 +77,16 @@ def get_collection_schema(collection_name: str) -> CollectionSchemaDef:
     return SCHEMA_REGISTRY.get(collection_name, DEFAULT_SCHEMA)
 
 
-def get_schema_hint_for_rag(collection_names: list[str]) -> str:
-    """Build a 'cheat sheet' of collections and their primary filters for the system prompt."""
-    if not collection_names:
+def get_schema_hint_for_rag(collection_name: str) -> str:
+    """Return the schema hint for a single collection for injection into RAG system prompt."""
+    schema = get_collection_schema(collection_name)
+    if not schema.fields:
         return ""
-    lines = []
-    for name in collection_names:
-        schema = get_collection_schema(name)
-        if not schema.fields:
-            continue
-        filters = ", ".join(schema.fields.keys())
-        lines.append(f"- {name}: filters [{filters}]. {schema.schema_hint}")
-    if not lines:
-        return ""
-    return "Schema hints (use these filters when the user query implies them):\n" + "\n".join(lines)
+    filters = ", ".join(schema.fields.keys())
+    return (
+        f"Schema hints (use these filters when the user query implies them):\n"
+        f"- {collection_name}: filters [{filters}]. {schema.schema_hint}"
+    )
 
 
 def build_filter_model(collection_name: str) -> type[BaseModel]:

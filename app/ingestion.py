@@ -39,6 +39,14 @@ def get_first_n_words(documents: list[Document], n: int = 1000) -> str:
     return " ".join(words[:n]) if words else ""
 
 
+def _normalize_collection_name(s: str) -> str:
+    """Lowercase, replace spaces/hyphens with underscores, strip non-word chars."""
+    s = s.strip().lower()
+    s = re.sub(r"[\s\-]+", "_", s)
+    s = re.sub(r"[^\w_]", "", s)
+    return s.strip("_")
+
+
 def classify_document_to_collection(
     sample_text: str,
     existing_collections: list[str],
@@ -54,10 +62,9 @@ def classify_document_to_collection(
     name = (raw or "").strip()
     if not name or name.upper() == "UNCLASSIFIED":
         return fallback_collection
-    name = re.sub(r"[^\w_]", " ", name).strip().replace(" ", "_").strip("_")
-    if not name or name.upper() == "UNCLASSIFIED":
+    name = _normalize_collection_name(name)
+    if not name or name == "unclassified":
         return fallback_collection
-    name = name.lower()
     if "_collection" not in name:
         name = name + "_collection"
     return name
@@ -79,10 +86,33 @@ def classify_query_to_collection(
     }) or "").strip()
     if not raw or raw.upper() == "UNCLASSIFIED":
         return fallback_collection
-    raw_lower = re.sub(r"[^\w_]", "", raw).strip().lower()
+    raw_norm = _normalize_collection_name(raw)
     for col in existing_collections:
-        col_norm = re.sub(r"[^\w_]", "", col).strip().lower()
-        if col_norm and raw_lower == col_norm:
+        if _normalize_collection_name(col) == raw_norm:
+            return col
+    return fallback_collection
+
+
+async def classify_query_to_collection_async(
+    user_query: str,
+    existing_collections: list[str],
+    fallback_collection: str,
+    llm: BaseChatModel,
+) -> str:
+    """Async variant for use in FastAPI endpoints (uses ainvoke, does not block event loop)."""
+    if not existing_collections:
+        return fallback_collection
+    existing_str = ", ".join(existing_collections)
+    chain = CLASSIFY_QUERY_COLLECTION_PROMPT | llm | StrOutputParser()
+    raw = (await chain.ainvoke({
+        "existing_collections": existing_str,
+        "user_query": (user_query or "").strip()[:2000],
+    }) or "").strip()
+    if not raw or raw.upper() == "UNCLASSIFIED":
+        return fallback_collection
+    raw_norm = _normalize_collection_name(raw)
+    for col in existing_collections:
+        if _normalize_collection_name(col) == raw_norm:
             return col
     return fallback_collection
 

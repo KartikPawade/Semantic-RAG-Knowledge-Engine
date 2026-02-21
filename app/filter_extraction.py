@@ -65,3 +65,44 @@ def extract_filters_from_query(
         return None
     filters = normalize_filter_values(collection_name, filters)
     return filters_to_chroma_where(filters)
+
+
+async def extract_filters_from_query_async(
+    user_query: str,
+    collection_name: str,
+    llm: BaseChatModel,
+) -> dict[str, Any] | None:
+    """
+    Async variant: extract metadata filters using the collection's schema (ainvoke).
+    """
+    schema = get_collection_schema(collection_name)
+    if not schema.fields:
+        return None
+    field_names = ", ".join(schema.fields.keys())
+    chain = EXTRACT_FILTER_PROMPT | llm | StrOutputParser()
+    raw = (await chain.ainvoke({
+        "field_names": field_names,
+        "schema_hint": schema.schema_hint,
+        "user_query": (user_query or "").strip()[:2000],
+    }) or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```\w*\n?", "", raw).strip()
+    if raw.endswith("```"):
+        raw = raw.rsplit("```", 1)[0].strip()
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return None
+    except json.JSONDecodeError:
+        return None
+    try:
+        model_cls = build_filter_model(collection_name)
+        payload = {k: v for k, v in data.items() if k in schema.fields}
+        if not payload:
+            return None
+        instance = model_cls(**payload)
+        filters = instance.model_dump(exclude_none=True)
+    except Exception:
+        return None
+    filters = normalize_filter_values(collection_name, filters)
+    return filters_to_chroma_where(filters)
