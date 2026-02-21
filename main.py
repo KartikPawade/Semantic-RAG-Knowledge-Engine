@@ -18,14 +18,14 @@ import httpx
 from fastapi import FastAPI, File, HTTPException, UploadFile, Query
 from pydantic import BaseModel, Field
 
-from config import get_settings
+from config import get_settings, get_provider
 from app.filter_extraction import extract_filters_from_query
 from app.ingestion import classify_query_to_collection
+from app.loaders import SUPPORTED_EXTENSIONS
 from app.messaging import publish_ingest_task
 from app.rag import build_rag_chain, build_rag_chain_with_query_expansion, ask_rag
 from app.schema_registry import get_schema_hint_for_rag
 from app.vector_store import get_vector_store, get_retriever, list_collection_names, clear_collection
-from app.llm import get_chat_model
 
 app = FastAPI(
     title="Enterprise Knowledge Engine",
@@ -34,6 +34,11 @@ app = FastAPI(
 )
 
 settings = get_settings()
+
+
+@app.on_event("startup")
+async def startup():
+    app.state.provider = get_provider(settings)
 
 
 # ----- Request/Response models -----
@@ -65,11 +70,11 @@ def _ensure_upload_dir():
 
 
 def _get_vector_store(collection: str):
+    embedding = app.state.provider.get_embedding_model()
     return get_vector_store(
         persist_directory=settings.chroma_persist_dir,
         collection_name=collection,
-        ollama_base_url=settings.ollama_base_url,
-        ollama_embedding_model=settings.ollama_embedding_model,
+        embedding=embedding,
     )
 
 
@@ -132,10 +137,10 @@ async def ingest(files: list[UploadFile] = File(...)):
     tasks: list[dict] = []
     for u in files:
         suffix = Path(u.filename or "").suffix.lower()
-        if suffix not in (".pdf", ".txt", ".text"):
+        if suffix not in SUPPORTED_EXTENSIONS:
             raise HTTPException(
                 status_code=400,
-                detail=f"Unsupported file type: {u.filename}. Use .pdf or .txt",
+                detail=f"Unsupported file type: {u.filename}. Supported: {sorted(SUPPORTED_EXTENSIONS)}",
             )
         task_id = uuid.uuid4().hex
         safe_name = (u.filename or "upload").replace(" ", "_")
@@ -175,12 +180,9 @@ async def search(body: SearchRequest):
     collection. Step 2: extract metadata filters from the query using that
     collection's schema; search runs on that collection with filter (or none).
     """
-    llm = get_chat_model(
-        base_url=settings.ollama_base_url,
-        model=settings.ollama_llm_model,
-    )
-    collection = _resolve_collection_for_query(body.query, llm)
-    chroma_filter = extract_filters_from_query(body.query, collection, llm)
+    fast_llm = app.state.provider.get_fast_model()
+    collection = _resolve_collection_for_query(body.query, fast_llm)
+    chroma_filter = extract_filters_from_query(body.query, collection, fast_llm)
     vs = _get_vector_store(collection)
     search_kwargs: dict = {"k": body.k}
     if chroma_filter:
@@ -204,12 +206,11 @@ async def ask(body: AskRequest):
     Step 2: extract metadata filters from the question; retrieval uses that
     collection and filter. Schema hints are injected into the system prompt.
     """
-    llm = get_chat_model(
-        base_url=settings.ollama_base_url,
-        model=settings.ollama_llm_model,
-    )
-    collection = _resolve_collection_for_query(body.question, llm)
-    chroma_filter = extract_filters_from_query(body.question, collection, llm)
+    provider = app.state.provider
+    fast_llm = provider.get_fast_model()
+    llm = provider.get_chat_model()
+    collection = _resolve_collection_for_query(body.question, fast_llm)
+    chroma_filter = extract_filters_from_query(body.question, collection, fast_llm)
     vs = _get_vector_store(collection)
     retriever = get_retriever(
         vs,
