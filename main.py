@@ -99,6 +99,7 @@ async def _resolve_collection_for_query(user_query: str, llm) -> str:
     Returns existing collection name or default_fallback_collection if none match.
     """
     existing = list_collection_names(settings.chroma_persist_dir)
+    logger.info("existing_collections fetched: %s", existing)
     return await classify_query_to_collection_async(
         user_query=user_query,
         existing_collections=existing,
